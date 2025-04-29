@@ -406,8 +406,9 @@ public function ajax_update_shipping_methods() {
         $shipping_data = array(
             'order_id' => $order_id,
             'paypal_order_id' => $paypal_order_id,
-            'shipping_method' => $selected_shipping_method,
-            'order_total' => $order->get_total(),
+            'shipping_method' => "FedEx",
+            //'order_total' => $order->get_total(),
+            'order_total' => 48,
             'currency' => $order->get_currency(),
             'server_id' => $server_id
         );
