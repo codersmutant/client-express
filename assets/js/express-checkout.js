@@ -1,446 +1,446 @@
 /**
- * PayPal Express Checkout JS - Client Side
+ * WooCommerce PayPal Proxy Client Express Checkout JS
  */
+
 (function($) {
     'use strict';
     
     // Variables to track order status
-    var expressOrderId = null;
-    var expressCreating = false;
-    var expressCompleting = false;
-    var paypalExpressOrderId = null;
+    var paypalOrderId = null;
+    var wcOrderId = null;
+    var expressCheckoutActive = false;
+    var selectedShippingMethod = null;
     
     /**
-     * Initialize express checkout
+     * Debug logging helper
      */
-    function initExpressCheckout() {
-        // Log initialization for debugging
-        debug('Initializing PayPal Express Checkout');
-        debug('PayPal Express iframe URL: ' + wpppc_express.iframe_url);
+    function debug(message, data) {
+        if (wpppc_express_params.debug_mode && console && console.log) {
+            if (data) {
+                console.log('[PayPal Express]', message, data);
+            } else {
+                console.log('[PayPal Express]', message);
+            }
+        }
+    }
+    
+    /**
+     * Show loading indicator
+     */
+    function showLoading(container) {
+        var loadingHtml = '<div class="wpppc-express-loading"><div class="wpppc-express-spinner"></div><span>Processing...</span></div>';
+        $(container).find('.wpppc-express-loading').remove();
+        $(container).append(loadingHtml);
+        $(container).find('.wpppc-express-loading').show();
+    }
+    
+    /**
+     * Hide loading indicator
+     */
+    function hideLoading(container) {
+        $(container).find('.wpppc-express-loading').hide();
+    }
+    
+    /**
+     * Show error message
+     */
+    function showError(message, container) {
+        var targetContainer = container || '';
         
-        // Create an iframe to load the PayPal button from the proxy server
-        var $container = $('#wpppc-express-button-container');
-        if ($container.length === 0) {
-            debug('Express checkout button container not found');
-            return;
+        if (targetContainer) {
+            $(targetContainer).find('#wpppc-express-error').text(message).show();
+            $(targetContainer).find('#wpppc-express-message').hide();
+        } else {
+            $('#wpppc-express-error').text(message).show();
+            $('#wpppc-express-message').hide();
         }
         
-        // Create and insert the iframe
+        // Scroll to the message
+        $('html, body').animate({
+            scrollTop: $(targetContainer || '#wpppc-express-error').offset().top - 100
+        }, 300);
+        
+        debug('Error displayed: ' + message);
+    }
+    
+    /**
+     * Show success message
+     */
+    function showMessage(message, container) {
+        var targetContainer = container || '';
+        
+        if (targetContainer) {
+            $(targetContainer).find('#wpppc-express-message').text(message).show();
+            $(targetContainer).find('#wpppc-express-error').hide();
+        } else {
+            $('#wpppc-express-message').text(message).show();
+            $('#wpppc-express-error').hide();
+        }
+        
+        debug('Message displayed: ' + message);
+    }
+    
+    /**
+     * Creates the express checkout iframe for the PayPal Smart Buttons
+     */
+    function createExpressButtonIframe(target) {
+        debug('Creating Express Checkout button iframe on ' + target);
+        
+        // Create iframe element
         var iframe = document.createElement('iframe');
-        iframe.id = 'paypal-express-iframe';
-        iframe.src = wpppc_express.iframe_url;
+        iframe.id = 'paypal-express-iframe-' + target.replace('#', '');
+        iframe.src = wpppc_express_params.iframe_url + '&context=' + target.replace('#', '');
+        iframe.frameBorder = 0;
+        iframe.scrolling = 'no';
         iframe.style.width = '100%';
-        iframe.style.height = '60px';
-        iframe.style.border = 'none';
+        iframe.style.minHeight = '45px';
+        iframe.style.height = '45px';
         iframe.style.overflow = 'hidden';
-        iframe.setAttribute('scrolling', 'no');
-        iframe.setAttribute('allowtransparency', 'true');
+        iframe.style.border = 'none';
         
-        $container.append(iframe);
+        // Set sandbox attributes for security
+        iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-same-origin allow-top-navigation');
         
-        // Set up message listener for communication with iframe
-        setupMessageListener();
+        // Append iframe to container
+        $(target).html('');
+        $(target).append(iframe);
         
-        debug('Express checkout iframe created');
+        // Setup message event listener for iframe communication
+        window.addEventListener('message', handleIframeMessages);
+        
+        debug('Iframe created for Express Checkout button on ' + target);
     }
     
     /**
-     * Set up message listener for communication with iframe
+     * Handle messages from the iframe
      */
-    function setupMessageListener() {
-        window.addEventListener('message', function(event) {
-            // Validate message source
-            debug('Received message from: ' + event.origin);
-            
-            // Extract iframe URL origin for validation
-            var iframeUrl = null;
-            try {
-                iframeUrl = new URL(wpppc_express.iframe_url);
-            } catch (error) {
-                debug('Invalid iframe URL: ' + error.message);
-                return;
-            }
-            
-            // Skip messages from other sources (but be lenient for development)
-            if (event.origin !== iframeUrl.origin && !event.origin.includes('paypal.com')) {
-                debug('Ignoring message from unknown origin: ' + event.origin);
-                return;
-            }
-            
-            var data = event.data;
-            
-            // Check if message is for us
-            if (!data || !data.action) {
-                return;
-            }
-            
-            debug('Received message action: ' + data.action);
-            
-            // Handle different actions
-            switch (data.action) {
-                case 'button_loaded':
-                    handleButtonLoaded();
-                    break;
-                    
-                case 'button_clicked':
-                    handleButtonClicked();
-                    break;
-                    
-                case 'shipping_address_updated':
-                    handleShippingAddressUpdate(data.payload);
-                    break;
-                    
-                case 'shipping_method_selected':
-                    handleShippingMethodSelected(data.payload);
-                    break;
-                    
-                case 'payment_approved':
-                    handlePaymentApproved(data.payload);
-                    break;
-                    
-                case 'payment_cancelled':
-                    handlePaymentCancelled();
-                    break;
-                    
-                case 'payment_error':
-                    handlePaymentError(data.error);
-                    break;
-                    
-                case 'resize_iframe':
-                    handleResizeIframe(data.height);
-                    break;
-            }
-        });
-        
-        debug('Message listener set up for iframe communication');
-    }
-    
-    /**
-     * Handle button loaded event
-     */
-    function handleButtonLoaded() {
-        debug('PayPal Express button loaded in iframe');
-    }
-    
-    /**
-     * Handle button clicked event - Create a WooCommerce order
-     */
-    function handleButtonClicked() {
-        debug('PayPal Express button clicked');
-        
-        if (expressCreating) {
-            debug('Already creating order, ignoring click');
+    function handleIframeMessages(event) {
+        // Validate message
+        if (!event.data || !event.data.action || event.data.source !== 'paypal-express-proxy') {
             return;
         }
         
-        expressCreating = true;
-        showSpinner();
+        debug('Received message from iframe:', event.data);
         
-        // Create an order via AJAX
+        var container = '#wpppc-express-paypal-button-cart';
+        if (wpppc_express_params.is_checkout_page) {
+            container = '#wpppc-express-paypal-button-checkout';
+        }
+        
+        // Handle different actions
+        switch (event.data.action) {
+            case 'button_loaded':
+                debug('PayPal Express button loaded');
+                break;
+                
+            case 'button_clicked':
+                debug('PayPal Express button clicked');
+                handleExpressCheckoutStart(container);
+                break;
+                
+            case 'payment_approved':
+                debug('Payment approved in PayPal', event.data.payload);
+                completeExpressCheckout(event.data.payload, container);
+                break;
+                
+            case 'payment_cancelled':
+                debug('Payment cancelled by user');
+                showError('Payment cancelled. You can try again when ready.', container);
+                expressCheckoutActive = false;
+                break;
+                
+            case 'payment_error':
+                debug('Payment error:', event.data.error);
+                showError('Error processing payment: ' + (event.data.error.message || 'Unknown error'), container);
+                expressCheckoutActive = false;
+                break;
+                
+            case 'resize_iframe':
+                // Resize the iframe based on content
+                if (event.data.height) {
+                    $('#' + event.data.iframeId).css('height', event.data.height + 'px');
+                    debug('Resized iframe to ' + event.data.height + 'px');
+                }
+                break;
+                
+            case 'shipping_options_needed':
+                debug('Shipping options needed for address', event.data.address);
+                updateShippingOptions(event.data, container);
+                break;
+                
+            case 'shipping_option_selected':
+                debug('Shipping option selected', event.data.selectedOption);
+                handleShippingMethodSelected(event.data.selectedOption, container);
+                break;
+        }
+    }
+    
+    /**
+     * Start Express Checkout process
+     */
+    function handleExpressCheckoutStart(container) {
+        if (expressCheckoutActive) {
+            debug('Express checkout already in progress, ignoring click');
+            return;
+        }
+        
+        expressCheckoutActive = true;
+        showLoading(container);
+        
+        debug('Starting Express Checkout process');
+        
+        // Create WooCommerce order via AJAX
         $.ajax({
-            url: wpppc_express.ajax_url,
+            url: wpppc_express_params.ajax_url,
             type: 'POST',
             data: {
                 action: 'wpppc_create_express_order',
-                nonce: wpppc_express.nonce
+                nonce: wpppc_express_params.nonce
             },
             success: function(response) {
                 if (response.success) {
-                    debug('Express order created: ' + response.data.order_id);
-                    expressOrderId = response.data.order_id;
+                    wcOrderId = response.data.order_id;
+                    paypalOrderId = response.data.paypal_order_id;
+                    
+                    debug('Express order created. WC Order ID: ' + wcOrderId + ', PayPal Order ID: ' + paypalOrderId);
                     
                     // Send order data to iframe
                     sendMessageToIframe({
                         action: 'create_paypal_order',
-                        order_id: response.data.order_id,
-                        order_key: response.data.order_key,
-                        order_total: response.data.order_total,
-                        currency: response.data.currency,
-                        api_key: response.data.server.api_key,
-                        timestamp: response.data.security.timestamp,
-                        hash: response.data.security.hash,
-                        proxy_data: response.data.proxy_data
+                        order_id: wcOrderId,
+                        paypal_order_id: paypalOrderId
                     });
+                    
+                    hideLoading(container);
                 } else {
-                    expressCreating = false;
-                    hideSpinner();
-                    showError(response.data.message || 'Failed to create order');
+                    expressCheckoutActive = false;
+                    hideLoading(container);
+                    showError(response.data.message || 'Failed to create order', container);
                 }
             },
-            error: function(xhr, status, error) {
-                expressCreating = false;
-                hideSpinner();
-                showError('Error creating order: ' + error);
+            error: function() {
+                expressCheckoutActive = false;
+                hideLoading(container);
+                showError('Error communicating with the server', container);
             }
         });
     }
     
     /**
- * Handle shipping address update from PayPal
- */
-function handleShippingAddressUpdate(addressData) {
-    debug('Shipping address updated from PayPal: ' + JSON.stringify(addressData));
-    
-    if (!expressOrderId) {
-        debug('No order ID available for shipping update');
-        return;
-    }
-    
-    // Get the address from PayPal format
-    var shippingAddress = {};
-    
-    if (addressData && addressData.shipping_address) {
-        var paypalAddress = addressData.shipping_address;
-        
-        // PayPal sometimes provides only partial address info
-        // We need to handle this gracefully
-        shippingAddress = {
-            // Set defaults or use empty values for missing fields
-            first_name: 'PayPal',
-            last_name: 'Customer',
-            address_1: paypalAddress.address_line_1 || '',
-            address_2: paypalAddress.address_line_2 || '',
-            city: paypalAddress.city || paypalAddress.admin_area_2 || '',
-            state: paypalAddress.state || paypalAddress.admin_area_1 || '',
-            postcode: paypalAddress.postal_code || '',
-            country: paypalAddress.country_code || ''
-        };
-        
-        // Some PayPal responses use different field names
-        if (!shippingAddress.address_1 && paypalAddress.recipient_name) {
-            // Try to extract name from recipient if available
-            var nameParts = paypalAddress.recipient_name.split(' ');
-            if (nameParts.length > 0) shippingAddress.first_name = nameParts[0];
-            if (nameParts.length > 1) shippingAddress.last_name = nameParts.slice(1).join(' ');
-        }
-    }
-    
-    // Add payer email if available
-    if (addressData && addressData.payer && addressData.payer.email_address) {
-        shippingAddress.email = addressData.payer.email_address;
-    }
-    
-    // Add payer phone if available
-    if (addressData && addressData.payer && addressData.payer.phone && 
-        addressData.payer.phone.phone_number && 
-        addressData.payer.phone.phone_number.national_number) {
-        shippingAddress.phone = addressData.payer.phone.phone_number.national_number;
-    }
-    
-    debug('Formatted shipping address: ' + JSON.stringify(shippingAddress));
-    
-    // Only proceed if we have at least some address data
-    if (Object.keys(shippingAddress).length === 0 || 
-        (!shippingAddress.city && !shippingAddress.country && !shippingAddress.postcode)) {
-        debug('No usable address data available');
-        return;
-    }
-    
-    // Update shipping methods via AJAX
-    $.ajax({
-        url: wpppc_express.ajax_url,
-        type: 'POST',
-        data: {
-            action: 'wpppc_update_express_shipping',
-            nonce: wpppc_express.nonce,
-            order_id: expressOrderId,
-            shipping_address: shippingAddress
-        },
-        success: function(response) {
-            if (response.success) {
-                debug('Shipping methods updated');
-                
-                // Send shipping options to iframe
-                sendMessageToIframe({
-                    action: 'shipping_options_updated',
-                    order_id: expressOrderId,
-                    order_total: response.data.order_total,
-                    shipping_options: response.data.shipping_methods,
-                    selected_option_id: response.data.selected_method
-                });
-            } else {
-                showError(response.data.message || 'Failed to update shipping options');
-            }
-        },
-        error: function(xhr, status, error) {
-            showError('Error updating shipping: ' + error);
-        }
-    });
-}
-    
-    /**
-     * Handle shipping method selected
+     * Update shipping options based on selected address
      */
-    function handleShippingMethodSelected(data) {
-        debug('Shipping method selected: ' + JSON.stringify(data));
+    function updateShippingOptions(data, container) {
+        debug('Updating shipping options for address', data.address);
         
-        // This would update the order with the selected shipping method
-        // But we're handling this server-side in our implementation
-    }
-    
-    /**
-     * Handle payment approved
-     */
-    function handlePaymentApproved(data) {
-        debug('Payment approved from PayPal: ' + JSON.stringify(data));
+        // Show loading indicator
+        showLoading(container);
         
-        if (expressCompleting) {
-            debug('Already completing order, ignoring duplicate approval');
-            return;
-        }
+        // Get shipping address from data
+        var shippingAddress = data.address;
         
-        if (!expressOrderId) {
-            showError('No order ID available for payment completion');
-            return;
-        }
+        // Send message to indicate we're processing
+        sendMessageToIframe({
+            action: 'shipping_update_processing'
+        });
         
-        expressCompleting = true;
-        showSpinner();
-        
-        // Store PayPal order ID
-        paypalExpressOrderId = data.orderID;
-        
-        // Complete the order via AJAX
+        // Call server to get shipping options
         $.ajax({
-            url: wpppc_express.ajax_url,
+            url: wpppc_express_params.ajax_url,
             type: 'POST',
             data: {
-                action: 'wpppc_complete_express_order',
-                nonce: wpppc_express.nonce,
-                order_id: expressOrderId,
-                paypal_order_id: data.orderID,
-                transaction_id: data.transactionID || '',
-                payer: data.payer || {},
-                shipping_address: data.shipping_address || {}
+                action: 'wpppc_update_shipping_methods',
+                nonce: wpppc_express_params.nonce,
+                order_id: wcOrderId,
+                paypal_order_id: paypalOrderId,
+                shipping_address: shippingAddress
+            },
+            success: function(response) {
+                hideLoading(container);
+                
+                if (response.success) {
+                    debug('Shipping options received', response.data);
+                    
+                    // Send shipping options to iframe
+                    sendMessageToIframe({
+                        action: 'shipping_options_available',
+                        shipping_options: response.data.shipping_options
+                    });
+                } else {
+                    debug('Error getting shipping options', response.data);
+                    
+                    // Send error to iframe
+                    sendMessageToIframe({
+                        action: 'shipping_options_error',
+                        message: response.data.message || 'No shipping options available for this address'
+                    });
+                    
+                    showError(response.data.message || 'No shipping options available for this address', container);
+                }
+            },
+            error: function() {
+                hideLoading(container);
+                
+                // Send error to iframe
+                sendMessageToIframe({
+                    action: 'shipping_options_error',
+                    message: 'Error communicating with the server'
+                });
+                
+                showError('Error communicating with the server', container);
+            }
+        });
+    }
+    
+    /**
+     * Handle shipping method selection
+     */
+    function handleShippingMethodSelected(shippingMethod, container) {
+        debug('Shipping method selected', shippingMethod);
+        
+        selectedShippingMethod = shippingMethod;
+        
+        // Update order with selected shipping method
+        $.ajax({
+            url: wpppc_express_params.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'wpppc_update_shipping_methods',
+                nonce: wpppc_express_params.nonce,
+                order_id: wcOrderId,
+                paypal_order_id: paypalOrderId,
+                shipping_method: shippingMethod
             },
             success: function(response) {
                 if (response.success) {
-                    debug('Order completed successfully, redirecting to: ' + response.data.redirect);
+                    debug('Shipping method updated successfully');
                     
-                    // Redirect to thank you page
-                    window.location.href = response.data.redirect;
+                    // Notify iframe of success
+                    sendMessageToIframe({
+                        action: 'shipping_method_updated'
+                    });
                 } else {
-                    expressCompleting = false;
-                    hideSpinner();
-                    showError(response.data.message || 'Failed to complete payment');
+                    debug('Error updating shipping method', response.data);
+                    
+                    // Notify iframe of error
+                    sendMessageToIframe({
+                        action: 'shipping_method_error',
+                        message: response.data.message || 'Failed to update shipping method'
+                    });
+                    
+                    showError(response.data.message || 'Failed to update shipping method', container);
                 }
             },
-            error: function(xhr, status, error) {
-                expressCompleting = false;
-                hideSpinner();
-                showError('Error completing payment: ' + error);
+            error: function() {
+                debug('AJAX error updating shipping method');
+                
+                // Notify iframe of error
+                sendMessageToIframe({
+                    action: 'shipping_method_error',
+                    message: 'Error communicating with the server'
+                });
+                
+                showError('Error communicating with the server', container);
             }
         });
     }
     
     /**
-     * Handle payment cancelled
+     * Complete Express Checkout after payment approval
      */
-    function handlePaymentCancelled() {
-        debug('Payment cancelled by user');
+    function completeExpressCheckout(paymentData, container) {
+        debug('Completing express checkout with payment data', paymentData);
         
-        // Reset order flags
-        expressCreating = false;
-        expressCompleting = false;
-        hideSpinner();
+        // Show loading indicator
+        showLoading(container);
+        showMessage('Finalizing your order...', container);
         
-        showMessage('Payment cancelled. You can try again when you\'re ready.');
+        // Complete the order via AJAX
+        $.ajax({
+            url: wpppc_express_params.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'wpppc_complete_express_order',
+                nonce: wpppc_express_params.nonce,
+                order_id: wcOrderId,
+                paypal_order_id: paypalOrderId
+            },
+            success: function(response) {
+                hideLoading(container);
+                
+                if (response.success) {
+                    debug('Order completed successfully, redirecting to:', response.data.redirect);
+                    
+                    // Show success message before redirect
+                    showMessage('Payment successful! Redirecting to order confirmation...', container);
+                    
+                    // Redirect to thank you page
+                    setTimeout(function() {
+                        window.location.href = response.data.redirect;
+                    }, 1000);
+                } else {
+                    expressCheckoutActive = false;
+                    showError(response.data.message || 'Failed to complete order', container);
+                }
+            },
+            error: function() {
+                expressCheckoutActive = false;
+                hideLoading(container);
+                showError('Error communicating with the server', container);
+            }
+        });
     }
     
     /**
-     * Handle payment error
-     */
-    function handlePaymentError(error) {
-        debug('Payment error from PayPal: ' + JSON.stringify(error));
-        
-        // Reset order flags
-        expressCreating = false;
-        expressCompleting = false;
-        hideSpinner();
-        
-        showError('PayPal error: ' + (error.message || 'Unknown error'));
-    }
-    
-    /**
-     * Handle iframe resize
-     */
-    function handleResizeIframe(height) {
-        if (height && !isNaN(height)) {
-            debug('Resizing iframe to height: ' + height);
-            $('#paypal-express-iframe').css('height', height + 'px');
-        }
-    }
-    
-    /**
-     * Send message to iframe
+     * Send message to the iframe
      */
     function sendMessageToIframe(message) {
-        const iframe = document.getElementById('paypal-express-iframe');
+        var iframe;
+        
+        if (wpppc_express_params.is_checkout_page) {
+            iframe = document.getElementById('paypal-express-iframe-wpppc-express-paypal-button-checkout');
+        } else {
+            iframe = document.getElementById('paypal-express-iframe-wpppc-express-paypal-button-cart');
+        }
+        
         if (!iframe || !iframe.contentWindow) {
             debug('Cannot find PayPal Express iframe');
             return;
         }
         
         // Add source identifier
-        message.source = 'woocommerce-site';
+        message.source = 'woocommerce-client';
         
-        debug('Sending message to iframe: ' + JSON.stringify(message));
+        debug('Sending message to iframe', message);
         
-        try {
-            // Send message - using wildcard origin for development
-            iframe.contentWindow.postMessage(message, '*');
-            debug('Message sent successfully to iframe');
-        } catch (error) {
-            debug('Error sending message to iframe: ' + error.message);
+        // Send message to iframe
+        iframe.contentWindow.postMessage(message, '*');
+    }
+    
+    /**
+     * Initialize Express Checkout
+     */
+    function initExpressCheckout() {
+        debug('Initializing PayPal Express Checkout');
+        
+        // Create express checkout buttons
+        if (wpppc_express_params.is_cart_page) {
+            createExpressButtonIframe('#wpppc-express-paypal-button-cart');
+        }
+        
+        if (wpppc_express_params.is_checkout_page) {
+            createExpressButtonIframe('#wpppc-express-paypal-button-checkout');
         }
     }
     
     /**
-     * Show error message
+     * Initialize on document ready
      */
-    function showError(message) {
-        debug('Showing error: ' + message);
-        $('#wpppc-express-error').text(message).show();
-        $('#wpppc-express-message').hide();
-    }
-    
-    /**
-     * Show message
-     */
-    function showMessage(message) {
-        debug('Showing message: ' + message);
-        $('#wpppc-express-message').text(message).show();
-        $('#wpppc-express-error').hide();
-    }
-    
-    /**
-     * Show spinner
-     */
-    function showSpinner() {
-        $('#wpppc-express-spinner').show();
-    }
-    
-    /**
-     * Hide spinner
-     */
-    function hideSpinner() {
-        $('#wpppc-express-spinner').hide();
-    }
-    
-    /**
-     * Debug logging
-     */
-    function debug(message) {
-        if (wpppc_express.debug_mode === 'yes') {
-            console.log('[PayPal Express] ' + message);
-        }
-    }
-    
-    // Initialize on document ready
     $(document).ready(function() {
-        // Only initialize on cart or checkout pages
-        if (wpppc_express.is_cart === 'yes' || wpppc_express.is_checkout === 'yes') {
+        // Initialize only if we have PayPal button containers
+        if ($('.wpppc-express-paypal-button').length > 0) {
             initExpressCheckout();
+        } else {
+            debug('No PayPal Express button containers found');
         }
     });
     

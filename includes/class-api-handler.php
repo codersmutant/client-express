@@ -299,7 +299,14 @@ class WPPPC_API_Handler {
         return $this->server->url . '?' . http_build_query($params);
     }
     
+    
     /**
+ * Additions to the WPPPC_API_Handler class for Express Checkout support
+ * 
+ * This code should be added to includes/class-api-handler.php
+ */
+
+/**
  * Generate iframe URL with parameters for Express Checkout
  */
 public function generate_express_iframe_url() {
@@ -307,39 +314,174 @@ public function generate_express_iframe_url() {
     $total = WC()->cart->get_total('');
     $currency = get_woocommerce_currency();
     
-    // Get callback URL
-    $callback_url = WC()->api_request_url('wpppc_callback');
+    // Get callback URL for shipping address updates
+    $callback_url = WC()->api_request_url('wpppc_shipping');
     
-    // Get current server
-    $this->server = $this->server_manager->get_selected_server();
-    if (!$this->server) {
-        $this->server = $this->server_manager->get_next_available_server();
-    }
-    
-    if (!$this->server) {
-        wpppc_log('No available server for Express Checkout iframe');
-        return '';
-    }
-    
-    // Generate a hash for security - NOTE: Use $this->server instead of $server
+    // Generate a hash for security
     $timestamp = time();
-    $hash_data = $timestamp . $total . $currency . $this->server->api_key;
+    $hash_data = $timestamp . 'express_checkout' . $this->server->api_key;
     $hash = hash_hmac('sha256', $hash_data, $this->server->api_secret);
     
-    // Build the iframe URL - NOTE: Use $this->server instead of $server
+    // Build the iframe URL
     $params = array(
-        'rest_route'    => '/wppps/v1/paypal-express-buttons',
-        'amount'        => $total,
-        'currency'      => $currency,
-        'api_key'       => $this->server->api_key,
-        'timestamp'     => $timestamp,
-        'hash'          => $hash,
-        'callback_url'  => base64_encode($callback_url),
-        'site_url'      => base64_encode(get_site_url()),
-        'server_id'     => isset($this->server->id) ? $this->server->id : 0,
-        'is_express'    => 'yes'
+        'rest_route'       => '/wppps/v1/express-paypal-buttons',
+        'amount'           => $total,
+        'currency'         => $currency,
+        'api_key'          => $this->server->api_key,
+        'timestamp'        => $timestamp,
+        'hash'             => $hash,
+        'callback_url'     => base64_encode($callback_url),
+        'site_url'         => base64_encode(get_site_url()),
+        'server_id'        => $this->server->id,
+        'needs_shipping'   => WC()->cart->needs_shipping() ? 'yes' : 'no',
+        'express'          => 'yes'
     );
     
+    wpppc_log("Express Checkout: Generated iframe URL with params: " . json_encode($params));
+    
     return $this->server->url . '?' . http_build_query($params);
+}
+
+/**
+ * Create Express Checkout order data
+ */
+public function create_express_checkout_order($order) {
+    if (!$order) {
+        return new WP_Error('invalid_order', __('Invalid order object', 'woo-paypal-proxy-client'));
     }
+    
+    wpppc_log("Express Checkout: Creating order data for order #" . $order->get_id());
+    
+    // Store the server ID used for this order
+    if (isset($this->server->id)) {
+        update_post_meta($order->get_id(), '_wpppc_server_id', $this->server->id);
+    }
+    
+    // Prepare order data
+    $order_data = array(
+        'order_id'       => $order->get_id(),
+        'order_key'      => $order->get_order_key(),
+        'order_total'    => $order->get_total(),
+        'currency'       => $order->get_currency(),
+        'customer_email' => $order->get_billing_email(),
+        'customer_name'  => $order->get_billing_first_name() . ' ' . $order->get_billing_last_name(),
+        'items'          => $this->get_order_items($order),
+        'site_url'       => get_site_url(),
+        'server_id'      => isset($this->server->id) ? $this->server->id : 0,
+        'express_checkout' => true,
+        'needs_shipping' => $order->needs_shipping_address(),
+        'callback_url'   => WC()->api_request_url('wpppc_shipping'),
+    );
+    
+    // Generate security hash
+    $timestamp = time();
+    $hash_data = $timestamp . $order->get_id() . $order->get_total() . $this->server->api_key;
+    $hash = hash_hmac('sha256', $hash_data, $this->server->api_secret);
+    
+    // Encode order data
+    $encoded_data = base64_encode(json_encode($order_data));
+    
+    // Prepare request parameters
+    $params = array(
+        'rest_route'  => '/wppps/v1/create-express-checkout',
+        'api_key'     => $this->server->api_key,
+        'timestamp'   => $timestamp,
+        'hash'        => $hash,
+        'order_data'  => $encoded_data,
+    );
+    
+    wpppc_log("Express Checkout: Sending request with params: " . json_encode($params));
+    
+    // Send request to Website B
+    $response = $this->make_request($params);
+    
+    return $response;
+}
+
+/**
+ * Update shipping methods for an Express Checkout order
+ */
+public function update_shipping_methods($order_id, $paypal_order_id, $shipping_method = '') {
+    $order = wc_get_order($order_id);
+    
+    if (!$order) {
+        return new WP_Error('invalid_order', __('Invalid order object', 'woo-paypal-proxy-client'));
+    }
+    
+    wpppc_log("Express Checkout: Updating shipping methods for order #$order_id, PayPal order $paypal_order_id, method: $shipping_method");
+    
+    // Prepare request data
+    $request_data = array(
+        'order_id'        => $order_id,
+        'paypal_order_id' => $paypal_order_id,
+        'shipping_method' => $shipping_method,
+        'order_total'     => $order->get_total(),
+        'currency'        => $order->get_currency(),
+        'server_id'       => isset($this->server->id) ? $this->server->id : 0,
+    );
+    
+    // Generate security hash
+    $timestamp = time();
+    $hash_data = $timestamp . $order_id . $paypal_order_id . $this->server->api_key;
+    $hash = hash_hmac('sha256', $hash_data, $this->server->api_secret);
+    
+    // Prepare request parameters
+    $params = array(
+        'rest_route'      => '/wppps/v1/update-express-shipping',
+        'api_key'         => $this->server->api_key,
+        'timestamp'       => $timestamp,
+        'hash'            => $hash,
+        'request_data'    => base64_encode(json_encode($request_data)),
+    );
+    
+    wpppc_log("Express Checkout: Sending shipping update with params: " . json_encode($params));
+    
+    // Send request to Website B
+    $response = $this->make_request($params);
+    
+    return $response;
+}
+
+/**
+ * Capture payment for an Express Checkout order
+ */
+public function capture_express_payment($order_id, $paypal_order_id) {
+    $order = wc_get_order($order_id);
+    
+    if (!$order) {
+        return new WP_Error('invalid_order', __('Invalid order object', 'woo-paypal-proxy-client'));
+    }
+    
+    wpppc_log("Express Checkout: Capturing payment for order #$order_id, PayPal order $paypal_order_id");
+    
+    // Prepare request data
+    $request_data = array(
+        'order_id'        => $order_id,
+        'paypal_order_id' => $paypal_order_id,
+        'order_total'     => $order->get_total(),
+        'currency'        => $order->get_currency(),
+        'server_id'       => isset($this->server->id) ? $this->server->id : 0,
+    );
+    
+    // Generate security hash
+    $timestamp = time();
+    $hash_data = $timestamp . $order_id . $paypal_order_id . $this->server->api_key;
+    $hash = hash_hmac('sha256', $hash_data, $this->server->api_secret);
+    
+    // Prepare request parameters
+    $params = array(
+        'rest_route'      => '/wppps/v1/capture-express-payment',
+        'api_key'         => $this->server->api_key,
+        'timestamp'       => $timestamp,
+        'hash'            => $hash,
+        'request_data'    => base64_encode(json_encode($request_data)),
+    );
+    
+    wpppc_log("Express Checkout: Sending capture request with params: " . json_encode($params));
+    
+    // Send request to Website B
+    $response = $this->make_request($params);
+    
+    return $response;
+}
 }

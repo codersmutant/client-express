@@ -63,8 +63,8 @@ function wpppc_init() {
     
     require_once WPPPC_PLUGIN_DIR . 'includes/class-express-checkout.php';
 
-
-
+// Initialize Express Checkout (will be auto-initialized in its constructor)
+new WPPPC_Express_Checkout();
     
     // Initialize classes
     WPPPC_Server_Manager::get_instance(); // Use singleton
@@ -948,6 +948,67 @@ function wpppc_update_server_table_for_product_pool() {
     }
 }
 
+
+/**
+ * Format money amount for display
+ */
+function wpppc_format_money($amount, $currency = '') {
+    $currency = $currency ?: get_woocommerce_currency();
+    
+    if (function_exists('wc_price')) {
+        return wc_price($amount, array('currency' => $currency));
+    }
+    
+    return number_format($amount, 2) . ' ' . $currency;
+}
+
+/**
+ * Calculate shipping methods for address
+ */
+function wpppc_calculate_shipping_for_address($address) {
+    wpppc_log("Calculating shipping for address: " . json_encode($address));
+    
+    // Create a shipping package
+    $package = array(
+        'contents' => WC()->cart->get_cart(),
+        'contents_cost' => WC()->cart->get_cart_contents_total(),
+        'applied_coupons' => WC()->cart->get_applied_coupons(),
+        'destination' => array(
+            'country' => $address['country'],
+            'state' => $address['state'],
+            'postcode' => $address['postcode'],
+            'city' => $address['city'],
+            'address' => $address['address_1'],
+            'address_2' => $address['address_2']
+        )
+    );
+    
+    // Reset current shipping methods
+    WC()->shipping()->reset_shipping();
+    
+    // Get available shipping methods
+    $shipping_methods = WC()->shipping()->calculate_shipping(array($package));
+    
+    wpppc_log("Found " . count($shipping_methods[0]['rates']) . " shipping methods");
+    
+    // Format shipping options for PayPal
+    $shipping_options = array();
+    
+    foreach ($shipping_methods[0]['rates'] as $method_id => $method) {
+        $shipping_options[] = array(
+            'id' => $method_id,
+            'label' => $method->get_label(),
+            'cost' => $method->get_cost(),
+            'tax' => $method->get_shipping_tax(),
+            'method_id' => $method->get_method_id(),
+            'instance_id' => $method->get_instance_id()
+        );
+        
+        wpppc_log("Added shipping method: {$method->get_label()} ({$method_id}) - Cost: {$method->get_cost()}");
+    }
+    
+    return $shipping_options;
+}
 
 /**
  * Plugin deactivation hook
