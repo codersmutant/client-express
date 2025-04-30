@@ -665,7 +665,7 @@ public function ajax_update_shipping_methods() {
     wp_die();
 }
     
-   /**
+/**
  * Handle shipping callback from proxy server
  */
 public function handle_shipping_callback() {
@@ -743,6 +743,9 @@ public function handle_shipping_callback() {
         $order->set_address($shipping_address, 'shipping');
         $order->save();
         
+        // NEW CODE: Store shipping address for later use (in case it gets lost)
+        $this->store_shipping_address($order_id, $shipping_address);
+        
         // Calculate shipping options for this address
         $shipping_options = wpppc_calculate_shipping_for_address($shipping_address);
         
@@ -787,8 +790,8 @@ public function handle_shipping_callback() {
     }
 }
     
-    /**
- * AJAX handler for completing an Express Checkout order
+/**
+ * AJAX handler for completing an Express Checkout order with extensive logging
  */
 public function ajax_complete_express_order() {
     check_ajax_referer('wpppc-express-nonce', 'nonce');
@@ -796,27 +799,224 @@ public function ajax_complete_express_order() {
     $order_id = isset($_POST['order_id']) ? intval($_POST['order_id']) : 0;
     $paypal_order_id = isset($_POST['paypal_order_id']) ? sanitize_text_field($_POST['paypal_order_id']) : '';
     
-    wpppc_log("Express Checkout: Completing order #$order_id, PayPal order $paypal_order_id");
+    wpppc_log("DEBUG: Express Checkout: Starting order completion for order #$order_id, PayPal order $paypal_order_id");
+    wpppc_log("DEBUG: Express Checkout: POST data: " . json_encode($_POST));
     
     try {
         // Get order
         $order = wc_get_order($order_id);
         if (!$order) {
+            wpppc_log("DEBUG: Express Checkout: Order not found: $order_id");
             throw new Exception(__('Order not found', 'woo-paypal-proxy-client'));
         }
+        
+        wpppc_log("DEBUG: Express Checkout: Order found, current data:");
+        wpppc_log("DEBUG: Express Checkout: - Billing first name: " . $order->get_billing_first_name());
+        wpppc_log("DEBUG: Express Checkout: - Billing last name: " . $order->get_billing_last_name());
+        wpppc_log("DEBUG: Express Checkout: - Billing address: " . $order->get_billing_address_1());
+        wpppc_log("DEBUG: Express Checkout: - Shipping first name: " . $order->get_shipping_first_name());
+        wpppc_log("DEBUG: Express Checkout: - Shipping last name: " . $order->get_shipping_last_name());
+        wpppc_log("DEBUG: Express Checkout: - Shipping address: " . $order->get_shipping_address_1());
         
         // Get server ID from order
         $server_id = get_post_meta($order->get_id(), '_wpppc_server_id', true);
         if (!$server_id) {
+            wpppc_log("DEBUG: Express Checkout: Server ID not found for order");
             throw new Exception(__('Server ID not found for order', 'woo-paypal-proxy-client'));
         }
+        
+        wpppc_log("DEBUG: Express Checkout: Server ID found: $server_id");
         
         // Get server
         $server_manager = WPPPC_Server_Manager::get_instance();
         $server = $server_manager->get_server($server_id);
         
         if (!$server) {
+            wpppc_log("DEBUG: Express Checkout: PayPal server not found for ID: $server_id");
             throw new Exception(__('PayPal server not found', 'woo-paypal-proxy-client'));
+        }
+        
+        wpppc_log("DEBUG: Express Checkout: Server found: " . json_encode($server));
+        
+        // Get API handler and retrieve order details from PayPal
+        wpppc_log("DEBUG: Express Checkout: Creating API handler with server ID: $server_id");
+        $api_handler = new WPPPC_API_Handler($server_id);
+        
+        wpppc_log("DEBUG: Express Checkout: Calling verify_payment for PayPal order: $paypal_order_id");
+        $paypal_order_data = $api_handler->verify_payment($paypal_order_id, $order);
+        
+        if (is_wp_error($paypal_order_data)) {
+            wpppc_log("DEBUG: Express Checkout: Error getting PayPal order details: " . $paypal_order_data->get_error_message());
+        } else {
+            wpppc_log("DEBUG: Express Checkout: Retrieved PayPal order data successfully");
+            wpppc_log("DEBUG: Express Checkout: PayPal data structure: " . json_encode(array_keys($paypal_order_data)));
+            
+            // Log billing address info availability
+            if (!empty($paypal_order_data['payer'])) {
+                wpppc_log("DEBUG: Express Checkout: Payer data found");
+                wpppc_log("DEBUG: Express Checkout: Payer structure: " . json_encode(array_keys($paypal_order_data['payer'])));
+                
+                if (!empty($paypal_order_data['payer']['name'])) {
+                    wpppc_log("DEBUG: Express Checkout: Payer name found: " . json_encode($paypal_order_data['payer']['name']));
+                } else {
+                    wpppc_log("DEBUG: Express Checkout: No payer name found");
+                }
+                
+                if (!empty($paypal_order_data['payer']['email_address'])) {
+                    wpppc_log("DEBUG: Express Checkout: Payer email found: " . $paypal_order_data['payer']['email_address']);
+                }
+                
+                if (!empty($paypal_order_data['payer']['address'])) {
+                    wpppc_log("DEBUG: Express Checkout: Payer address found: " . json_encode($paypal_order_data['payer']['address']));
+                } else {
+                    wpppc_log("DEBUG: Express Checkout: No payer address found or it's incomplete");
+                }
+            } else {
+                wpppc_log("DEBUG: Express Checkout: No payer data found");
+            }
+            
+            // Log shipping address info availability
+            if (!empty($paypal_order_data['purchase_units'])) {
+                wpppc_log("DEBUG: Express Checkout: Purchase units found: " . count($paypal_order_data['purchase_units']));
+                
+                if (!empty($paypal_order_data['purchase_units'][0]['shipping'])) {
+                    wpppc_log("DEBUG: Express Checkout: Shipping data found");
+                    wpppc_log("DEBUG: Express Checkout: Shipping structure: " . 
+                              json_encode(array_keys($paypal_order_data['purchase_units'][0]['shipping'])));
+                    
+                    if (!empty($paypal_order_data['purchase_units'][0]['shipping']['name'])) {
+                        wpppc_log("DEBUG: Express Checkout: Shipping name found: " . 
+                                 json_encode($paypal_order_data['purchase_units'][0]['shipping']['name']));
+                    }
+                    
+                    if (!empty($paypal_order_data['purchase_units'][0]['shipping']['address'])) {
+                        wpppc_log("DEBUG: Express Checkout: Shipping address found: " . 
+                                 json_encode($paypal_order_data['purchase_units'][0]['shipping']['address']));
+                    }
+                } else {
+                    wpppc_log("DEBUG: Express Checkout: No shipping data found in purchase units");
+                }
+            } else {
+                wpppc_log("DEBUG: Express Checkout: No purchase units found");
+            }
+            
+            // ==== EXTRACT AND SAVE BILLING ADDRESS ====
+            wpppc_log("DEBUG: Express Checkout: Starting billing address extraction");
+            
+            if (!empty($paypal_order_data['payer'])) {
+                $billing_address = array();
+                
+                // Get name
+                if (!empty($paypal_order_data['payer']['name'])) {
+                    $billing_address['first_name'] = isset($paypal_order_data['payer']['name']['given_name']) ? 
+                        $paypal_order_data['payer']['name']['given_name'] : '';
+                    $billing_address['last_name'] = isset($paypal_order_data['payer']['name']['surname']) ? 
+                        $paypal_order_data['payer']['name']['surname'] : '';
+                    
+                    wpppc_log("DEBUG: Express Checkout: Extracted billing name: " . 
+                             $billing_address['first_name'] . ' ' . $billing_address['last_name']);
+                }
+                
+                // Get email
+                if (!empty($paypal_order_data['payer']['email_address'])) {
+                    $billing_address['email'] = $paypal_order_data['payer']['email_address'];
+                    wpppc_log("DEBUG: Express Checkout: Extracted billing email: " . $billing_address['email']);
+                }
+                
+                // Get billing address (may be limited)
+                if (!empty($paypal_order_data['payer']['address'])) {
+                    if (!empty($paypal_order_data['payer']['address']['address_line_1'])) {
+                        $billing_address['address_1'] = $paypal_order_data['payer']['address']['address_line_1'];
+                    }
+                    if (!empty($paypal_order_data['payer']['address']['address_line_2'])) {
+                        $billing_address['address_2'] = $paypal_order_data['payer']['address']['address_line_2'];
+                    }
+                    if (!empty($paypal_order_data['payer']['address']['admin_area_2'])) {
+                        $billing_address['city'] = $paypal_order_data['payer']['address']['admin_area_2'];
+                    }
+                    if (!empty($paypal_order_data['payer']['address']['admin_area_1'])) {
+                        $billing_address['state'] = $paypal_order_data['payer']['address']['admin_area_1'];
+                    }
+                    if (!empty($paypal_order_data['payer']['address']['postal_code'])) {
+                        $billing_address['postcode'] = $paypal_order_data['payer']['address']['postal_code'];
+                    }
+                    if (!empty($paypal_order_data['payer']['address']['country_code'])) {
+                        $billing_address['country'] = $paypal_order_data['payer']['address']['country_code'];
+                    }
+                    
+                    wpppc_log("DEBUG: Express Checkout: Extracted billing address: " . json_encode($billing_address));
+                }
+                
+                // Set billing address if we have at least name
+                if (!empty($billing_address['first_name'])) {
+                    wpppc_log("DEBUG: Express Checkout: Setting billing address on order");
+                    $order->set_address($billing_address, 'billing');
+                    wpppc_log("DEBUG: Express Checkout: Billing address set, current first name: " . $order->get_billing_first_name());
+                }
+            }
+            
+            // ==== EXTRACT AND SAVE SHIPPING ADDRESS ====
+            wpppc_log("DEBUG: Express Checkout: Starting shipping address extraction");
+            
+            if (!empty($paypal_order_data['purchase_units']) && 
+                is_array($paypal_order_data['purchase_units']) && 
+                !empty($paypal_order_data['purchase_units'][0]['shipping'])) {
+                
+                $shipping_data = $paypal_order_data['purchase_units'][0]['shipping'];
+                $shipping_address = array();
+                
+                // Get name (might be full_name or given_name/surname)
+                if (!empty($shipping_data['name'])) {
+                    if (!empty($shipping_data['name']['full_name'])) {
+                        $name_parts = explode(' ', $shipping_data['name']['full_name'], 2);
+                        $shipping_address['first_name'] = $name_parts[0];
+                        $shipping_address['last_name'] = isset($name_parts[1]) ? $name_parts[1] : '';
+                        
+                        wpppc_log("DEBUG: Express Checkout: Extracted shipping name from full_name: " . 
+                                 $shipping_address['first_name'] . ' ' . $shipping_address['last_name']);
+                    } else if (!empty($shipping_data['name']['given_name'])) {
+                        $shipping_address['first_name'] = $shipping_data['name']['given_name'];
+                        $shipping_address['last_name'] = !empty($shipping_data['name']['surname']) ? 
+                            $shipping_data['name']['surname'] : '';
+                        
+                        wpppc_log("DEBUG: Express Checkout: Extracted shipping name from given_name/surname: " . 
+                                 $shipping_address['first_name'] . ' ' . $shipping_address['last_name']);
+                    }
+                }
+                
+                // Get address
+                if (!empty($shipping_data['address'])) {
+                    $shipping_address['address_1'] = $shipping_data['address']['address_line_1'] ?? '';
+                    $shipping_address['address_2'] = $shipping_data['address']['address_line_2'] ?? '';
+                    $shipping_address['city'] = $shipping_data['address']['admin_area_2'] ?? '';
+                    $shipping_address['state'] = $shipping_data['address']['admin_area_1'] ?? '';
+                    $shipping_address['postcode'] = $shipping_data['address']['postal_code'] ?? '';
+                    $shipping_address['country'] = $shipping_data['address']['country_code'] ?? '';
+                    
+                    wpppc_log("DEBUG: Express Checkout: Extracted shipping address: " . json_encode($shipping_address));
+                }
+                
+                // Set shipping address if we have enough data
+                if (!empty($shipping_address['first_name']) && !empty($shipping_address['address_1'])) {
+                    wpppc_log("DEBUG: Express Checkout: Setting shipping address on order");
+                    $order->set_address($shipping_address, 'shipping');
+                    wpppc_log("DEBUG: Express Checkout: Shipping address set, current first name: " . 
+                             $order->get_shipping_first_name());
+                    wpppc_log("DEBUG: Express Checkout: Shipping address set, current address: " . 
+                             $order->get_shipping_address_1());
+                }
+            }
+            
+            // Save the order with updated addresses
+            wpppc_log("DEBUG: Express Checkout: Saving order with updated addresses");
+            $order->save();
+            
+            // Verify the order saved correctly by retrieving it again
+            $updated_order = wc_get_order($order_id);
+            wpppc_log("DEBUG: Express Checkout: After save - Billing first name: " . $updated_order->get_billing_first_name());
+            wpppc_log("DEBUG: Express Checkout: After save - Billing address: " . $updated_order->get_billing_address_1());
+            wpppc_log("DEBUG: Express Checkout: After save - Shipping first name: " . $updated_order->get_shipping_first_name());
+            wpppc_log("DEBUG: Express Checkout: After save - Shipping address: " . $updated_order->get_shipping_address_1());
         }
         
         // Create request data for proxy server
@@ -837,7 +1037,7 @@ public function ajax_complete_express_order() {
         $request_data['hash'] = $hash;
         
         // Log the data we're sending
-        wpppc_log("Express Checkout: Sending capture request to proxy server: " . json_encode($request_data));
+        wpppc_log("DEBUG: Express Checkout: Sending capture request to proxy server: " . json_encode($request_data));
         
         // Send request to proxy server
         $response = wp_remote_post(
@@ -851,15 +1051,15 @@ public function ajax_complete_express_order() {
         
         // Check for errors
         if (is_wp_error($response)) {
-            wpppc_log("Express Checkout: Error communicating with proxy server: " . $response->get_error_message());
+            wpppc_log("DEBUG: Express Checkout: Error communicating with proxy server: " . $response->get_error_message());
             throw new Exception(__('Error communicating with proxy server: ', 'woo-paypal-proxy-client') . $response->get_error_message());
         }
         
         // Get response code
         $response_code = wp_remote_retrieve_response_code($response);
         if ($response_code !== 200) {
-            wpppc_log("Express Checkout: Proxy server returned error code: $response_code");
-            wpppc_log("Express Checkout: Response body: " . wp_remote_retrieve_body($response));
+            wpppc_log("DEBUG: Express Checkout: Proxy server returned error code: $response_code");
+            wpppc_log("DEBUG: Express Checkout: Response body: " . wp_remote_retrieve_body($response));
             throw new Exception(__('Proxy server returned error', 'woo-paypal-proxy-client'));
         }
         
@@ -868,7 +1068,7 @@ public function ajax_complete_express_order() {
         
         if (!$body || !isset($body['success']) || $body['success'] !== true) {
             $error_message = isset($body['message']) ? $body['message'] : __('Unknown error from proxy server', 'woo-paypal-proxy-client');
-            wpppc_log("Express Checkout: Proxy server error: $error_message");
+            wpppc_log("DEBUG: Express Checkout: Proxy server error: $error_message");
             throw new Exception($error_message);
         }
         
@@ -876,8 +1076,11 @@ public function ajax_complete_express_order() {
         $transaction_id = isset($body['transaction_id']) ? $body['transaction_id'] : '';
         $seller_protection = isset($body['seller_protection']) ? $body['seller_protection'] : 'UNKNOWN';
         
+        wpppc_log("DEBUG: Express Checkout: Got transaction ID: $transaction_id");
+        
         // Update order with transaction ID and complete payment
         if (!empty($transaction_id)) {
+            wpppc_log("DEBUG: Express Checkout: Completing payment with transaction ID: $transaction_id");
             $order->payment_complete($transaction_id);
             $order->add_order_note(sprintf(__('Payment completed via PayPal Express Checkout. Transaction ID: %s, Seller Protection: %s', 'woo-paypal-proxy-client'), $transaction_id, $seller_protection));
             update_post_meta($order->get_id(), '_paypal_transaction_id', $transaction_id);
@@ -888,13 +1091,20 @@ public function ajax_complete_express_order() {
             
             // Add to server usage
             $result = $server_manager->add_server_usage($server_id, $order_amount);
-            wpppc_log("Express Checkout: Added $order_amount to server usage for server ID $server_id. Result: " . ($result ? "success" : "failed"));
+            wpppc_log("DEBUG: Express Checkout: Added $order_amount to server usage for server ID $server_id. Result: " . ($result ? "success" : "failed"));
         }
+        
+        // Check final order state AFTER payment_complete
+        $final_order = wc_get_order($order_id);
+        wpppc_log("DEBUG: Express Checkout: FINAL ORDER STATE - Billing first name: " . $final_order->get_billing_first_name());
+        wpppc_log("DEBUG: Express Checkout: FINAL ORDER STATE - Billing address: " . $final_order->get_billing_address_1());
+        wpppc_log("DEBUG: Express Checkout: FINAL ORDER STATE - Shipping first name: " . $final_order->get_shipping_first_name());
+        wpppc_log("DEBUG: Express Checkout: FINAL ORDER STATE - Shipping address: " . $final_order->get_shipping_address_1());
         
         // Empty the cart
         WC()->cart->empty_cart();
         
-        wpppc_log("Express Checkout: Order #$order_id completed successfully");
+        wpppc_log("DEBUG: Express Checkout: Order #$order_id completed successfully");
         
         // Return success with redirect URL
         wp_send_json_success(array(
@@ -902,13 +1112,108 @@ public function ajax_complete_express_order() {
         ));
         
     } catch (Exception $e) {
-        wpppc_log("Express Checkout: Error completing order: " . $e->getMessage());
+        wpppc_log("DEBUG: Express Checkout: Error completing order: " . $e->getMessage());
         wp_send_json_error(array(
             'message' => $e->getMessage()
         ));
     }
     
     wp_die();
+}
+
+
+/**
+ * Get the complete PayPal order details directly from PayPal API
+ */
+private function get_paypal_order_details($server_id, $paypal_order_id) {
+    wpppc_log("Express Checkout: Fetching complete PayPal order details directly from proxy server");
+    
+    // Get server
+    $server_manager = WPPPC_Server_Manager::get_instance();
+    $server = $server_manager->get_server($server_id);
+    
+    if (!$server) {
+        wpppc_log("Express Checkout: Server not found for ID: $server_id");
+        return new WP_Error('server_not_found', 'PayPal server not found');
+    }
+    
+    // Generate security hash
+    $timestamp = time();
+    $hash_data = $timestamp . $paypal_order_id . $server->api_key;
+    $hash = hash_hmac('sha256', $hash_data, $server->api_secret);
+    
+    // Create request data
+    $request_data = array(
+        'action' => 'get_order_details',
+        'api_key' => $server->api_key,
+        'timestamp' => $timestamp,
+        'hash' => $hash,
+        'paypal_order_id' => $paypal_order_id
+    );
+    
+    // Log the request
+    wpppc_log("Express Checkout: Sending get_order_details request to proxy server");
+    
+    // Make the request to the proxy server
+    $response = wp_remote_post(
+        $server->url . '/wp-json/wppps/v1/get-paypal-order',
+        array(
+            'timeout' => 30,
+            'headers' => array('Content-Type' => 'application/json'),
+            'body' => json_encode($request_data)
+        )
+    );
+    
+    // Check for errors
+    if (is_wp_error($response)) {
+        wpppc_log("Express Checkout: Error fetching PayPal order details: " . $response->get_error_message());
+        return $response;
+    }
+    
+    // Check response code
+    $response_code = wp_remote_retrieve_response_code($response);
+    if ($response_code !== 200) {
+        wpppc_log("Express Checkout: Proxy server returned error code: $response_code");
+        return new WP_Error('proxy_error', 'Proxy server returned error code: ' . $response_code);
+    }
+    
+    // Parse the response
+    $body = json_decode(wp_remote_retrieve_body($response), true);
+    
+    if (!$body || !isset($body['success']) || $body['success'] !== true) {
+        $error_message = isset($body['message']) ? $body['message'] : 'Unknown error';
+        wpppc_log("Express Checkout: Failed to get PayPal order details: $error_message");
+        return new WP_Error('invalid_response', $error_message);
+    }
+    
+    // Get the complete order details
+    if (empty($body['order_details'])) {
+        wpppc_log("Express Checkout: No order details in response");
+        return new WP_Error('no_details', 'No order details in response');
+    }
+    
+    wpppc_log("Express Checkout: Successfully retrieved complete PayPal order details");
+    return $body['order_details'];
+}
+
+/**
+ * Helper function to store shipping address during checkout process
+ * This should be called in the handle_shipping_callback function
+ */
+public function store_shipping_address($order_id, $shipping_address, $billing_address = null) {
+    $data = array(
+        'shipping' => $shipping_address
+    );
+    
+    if ($billing_address) {
+        $data['billing'] = $billing_address;
+    }
+    
+    // Store for 24 hours
+    set_transient('wpppc_express_shipping_address_' . $order_id, $data, 24 * HOUR_IN_SECONDS);
+    wpppc_log("Express Checkout: Stored shipping address for order #$order_id for later use");
+    
+    return true;
 }
     
 }
