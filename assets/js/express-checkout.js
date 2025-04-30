@@ -226,70 +226,68 @@
         });
     }
     
-    /**
-     * Update shipping options based on selected address
-     */
-    function updateShippingOptions(data, container) {
-        debug('Updating shipping options for address', data.address);
-        
-        // Show loading indicator
-        showLoading(container);
-        
-        // Get shipping address from data
-        var shippingAddress = data.address;
-        
-        // Send message to indicate we're processing
-        sendMessageToIframe({
-            action: 'shipping_update_processing'
-        });
-        
-        // Call server to get shipping options
-        $.ajax({
-            url: wpppc_express_params.ajax_url,
-            type: 'POST',
-            data: {
-                action: 'wpppc_update_shipping_methods',
-                nonce: wpppc_express_params.nonce,
-                order_id: wcOrderId,
-                paypal_order_id: paypalOrderId,
-                shipping_address: shippingAddress
-            },
-            success: function(response) {
-                hideLoading(container);
+    // Update shipping options based on selected address
+function updateShippingOptions(data, container) {
+    debug('Updating shipping options for address', data.address);
+    
+    // Show loading indicator
+    showLoading(container);
+    
+    // Get shipping address from data
+    var shippingAddress = data.address;
+    
+    // Send message to indicate we're processing
+    sendMessageToIframe({
+        action: 'shipping_update_processing'
+    });
+    
+    // Call server to get shipping options
+    $.ajax({
+        url: wpppc_express_params.ajax_url,
+        type: 'POST',
+        data: {
+            action: 'wpppc_update_shipping_methods',
+            nonce: wpppc_express_params.nonce,
+            order_id: wcOrderId,
+            paypal_order_id: paypalOrderId,
+            shipping_address: shippingAddress
+        },
+        success: function(response) {
+            hideLoading(container);
+            
+            if (response.success) {
+                debug('Shipping options received', response.data);
                 
-                if (response.success) {
-                    debug('Shipping options received', response.data);
-                    
-                    // Send shipping options to iframe
-                    sendMessageToIframe({
-                        action: 'shipping_options_available',
-                        shipping_options: response.data.shipping_options
-                    });
-                } else {
-                    debug('Error getting shipping options', response.data);
-                    
-                    // Send error to iframe
-                    sendMessageToIframe({
-                        action: 'shipping_options_error',
-                        message: response.data.message || 'No shipping options available for this address'
-                    });
-                    
-                    showError(response.data.message || 'No shipping options available for this address', container);
-                }
-            },
-            error: function() {
-                hideLoading(container);
+                // Send shipping options to iframe
+                sendMessageToIframe({
+                    action: 'shipping_options_available',
+                    shipping_options: response.data.shipping_options || []
+                });
+            } else {
+                debug('Error getting shipping options', response.data);
                 
                 // Send error to iframe
                 sendMessageToIframe({
                     action: 'shipping_options_error',
-                    message: 'Error communicating with the server'
+                    message: response.data.message || 'No shipping options available for this address'
                 });
                 
-                showError('Error communicating with the server', container);
+                showError(response.data.message || 'No shipping options available for this address', container);
             }
-        });
-    }
+        },
+        error: function() {
+            hideLoading(container);
+            
+            // Send error to iframe
+            sendMessageToIframe({
+                action: 'shipping_options_error',
+                message: 'Error communicating with the server'
+            });
+            
+            showError('Error communicating with the server', container);
+        }
+    });
+}
     
     /**
      * Handle shipping method selection
@@ -298,6 +296,15 @@
         debug('Shipping method selected', shippingMethod);
         
         selectedShippingMethod = shippingMethod;
+        
+        // Find the selected shipping option to get its cost
+        var selectedOption = null;
+        for (var i = 0; i < orderData.shippingOptions.length; i++) {
+            if (orderData.shippingOptions[i].id === shippingMethod) {
+                selectedOption = orderData.shippingOptions[i];
+                break;
+            }
+        }
         
         // Update order with selected shipping method
         $.ajax({
@@ -308,7 +315,8 @@
                 nonce: wpppc_express_params.nonce,
                 order_id: wcOrderId,
                 paypal_order_id: paypalOrderId,
-                shipping_method: shippingMethod
+                shipping_method: shippingMethod,
+                shipping_cost: selectedOption ? selectedOption.cost : 0
             },
             success: function(response) {
                 if (response.success) {

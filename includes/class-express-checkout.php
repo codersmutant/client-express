@@ -369,7 +369,7 @@ public function ajax_create_express_order() {
     wp_die();
 }
     
-    /**
+/**
  * AJAX handler for updating shipping methods - FIXED VERSION
  */
 public function ajax_update_shipping_methods() {
@@ -378,8 +378,9 @@ public function ajax_update_shipping_methods() {
     $order_id = isset($_POST['order_id']) ? intval($_POST['order_id']) : 0;
     $paypal_order_id = isset($_POST['paypal_order_id']) ? sanitize_text_field($_POST['paypal_order_id']) : '';
     $selected_shipping_method = isset($_POST['shipping_method']) ? sanitize_text_field($_POST['shipping_method']) : '';
+    $shipping_address = isset($_POST['shipping_address']) ? $_POST['shipping_address'] : array();
     
-    wpppc_log("Express Checkout: Updating shipping methods for order #$order_id, PayPal order $paypal_order_id, method: $selected_shipping_method");
+    wpppc_log("Express Checkout: Updating shipping methods for order #$order_id, PayPal order $paypal_order_id");
     
     try {
         // Get order
@@ -399,18 +400,57 @@ public function ajax_update_shipping_methods() {
         $server = $server_manager->get_server($server_id);
         
         if (!$server) {
-            throw new Exception(__('PayPal server not found', 'woo-paypal-proxy-client'));
+            throw new Exception(__('PayPal server not found', 'woo-paypal-proxy-server'));
         }
         
-        // Prepare inner request data
+        // If we have a shipping address, set it to the order for calculation
+        if (!empty($shipping_address)) {
+            $formatted_address = array(
+                'first_name' => $order->get_billing_first_name(),
+                'last_name'  => $order->get_billing_last_name(),
+                'company'    => '',
+                'address_1'  => isset($shipping_address['address_line_1']) ? $shipping_address['address_line_1'] : '',
+                'address_2'  => isset($shipping_address['address_line_2']) ? $shipping_address['address_line_2'] : '',
+                'city'       => isset($shipping_address['admin_area_2']) ? $shipping_address['admin_area_2'] : '',
+                'state'      => isset($shipping_address['admin_area_1']) ? $shipping_address['admin_area_1'] : '',
+                'postcode'   => isset($shipping_address['postal_code']) ? $shipping_address['postal_code'] : '',
+                'country'    => isset($shipping_address['country_code']) ? $shipping_address['country_code'] : '',
+            );
+            
+            // Update order with this address for shipping calculation
+            $order->set_address($formatted_address, 'shipping');
+            $order->save();
+            
+            // Calculate shipping options for this address
+            $shipping_options = wpppc_calculate_shipping_for_address($formatted_address);
+            wpppc_log("Express Checkout: Calculated " . count($shipping_options) . " shipping options");
+        }
+        
+        // If we have a selected shipping method, use it
+        if (!empty($selected_shipping_method) && isset($shipping_options)) {
+            // Find the selected method in options
+            $selected_option = null;
+            foreach ($shipping_options as $option) {
+                if ($option['id'] == $selected_shipping_method) {
+                    $selected_option = $option;
+                    break;
+                }
+            }
+            
+            if ($selected_option) {
+                wpppc_log("Express Checkout: Selected shipping option: " . $selected_option['label'] . " (" . $selected_option['cost'] . ")");
+            }
+        }
+        
+        // Prepare inner request data with real shipping data
         $shipping_data = array(
             'order_id' => $order_id,
             'paypal_order_id' => $paypal_order_id,
-            'shipping_method' => "FedEx",
-            //'order_total' => $order->get_total(),
-            'order_total' => 48,
+            'shipping_method' => !empty($selected_option) ? $selected_option['id'] : (!empty($selected_shipping_method) ? $selected_shipping_method : null),
+            'order_total' => $order->get_total(),
             'currency' => $order->get_currency(),
-            'server_id' => $server_id
+            'server_id' => $server_id,
+            'shipping_options' => isset($shipping_options) ? $shipping_options : array()
         );
         
         // Encode the shipping data
@@ -426,11 +466,11 @@ public function ajax_update_shipping_methods() {
             'api_key' => $server->api_key,
             'timestamp' => $timestamp,
             'hash' => $hash,
-            'request_data' => $request_data_encoded  // <- THIS IS THE KEY FIX
+            'request_data' => $request_data_encoded
         );
         
         // Log the data we're sending
-        wpppc_log("Express Checkout: Sending properly formatted shipping update to proxy server: " . json_encode($request_data));
+        wpppc_log("Express Checkout: Sending shipping update to proxy server: " . json_encode($request_data));
         
         // Send request to proxy server
         $response = wp_remote_post(
@@ -467,10 +507,16 @@ public function ajax_update_shipping_methods() {
         
         wpppc_log("Express Checkout: Successfully updated shipping method");
         
-        // Return success
-        wp_send_json_success(array(
+        // Return success with shipping options if available
+        $response_data = array(
             'message' => __('Shipping method updated', 'woo-paypal-proxy-client')
-        ));
+        );
+        
+        if (isset($shipping_options) && !empty($shipping_options)) {
+            $response_data['shipping_options'] = $shipping_options;
+        }
+        
+        wp_send_json_success($response_data);
         
     } catch (Exception $e) {
         wpppc_log("Express Checkout: Error updating shipping methods: " . $e->getMessage());
@@ -482,165 +528,127 @@ public function ajax_update_shipping_methods() {
     wp_die();
 }
     
-    /**
-     * Handle shipping callback from proxy server
-     */
-    public function handle_shipping_callback() {
-        wpppc_log("Express Checkout: Received shipping callback");
+   /**
+ * Handle shipping callback from proxy server
+ */
+public function handle_shipping_callback() {
+    wpppc_log("Express Checkout: Received shipping callback");
+    
+    // Get callback data
+    $order_id = isset($_GET['order_id']) ? intval($_GET['order_id']) : 0;
+    $paypal_order_id = isset($_GET['paypal_order_id']) ? sanitize_text_field($_GET['paypal_order_id']) : '';
+    $shipping_data = isset($_POST['shipping_data']) ? json_decode(wp_unslash($_POST['shipping_data']), true) : array();
+    $hash = isset($_GET['hash']) ? sanitize_text_field($_GET['hash']) : '';
+    $timestamp = isset($_GET['timestamp']) ? intval($_GET['timestamp']) : 0;
+    
+    wpppc_log("Express Checkout: Shipping callback for order #$order_id, PayPal order $paypal_order_id");
+    wpppc_log("Express Checkout: Shipping data: " . json_encode($shipping_data));
+    
+    // Send response headers early
+    status_header(200);
+    header('Content-Type: application/json');
+    
+    try {
+        // Validate essential data
+        if (!$order_id || !$paypal_order_id || empty($shipping_data)) {
+            throw new Exception('Missing required data');
+        }
         
-        // Get callback data
-        $order_id = isset($_GET['order_id']) ? intval($_GET['order_id']) : 0;
-        $paypal_order_id = isset($_GET['paypal_order_id']) ? sanitize_text_field($_GET['paypal_order_id']) : '';
-        $shipping_data = isset($_POST['shipping_data']) ? json_decode(wp_unslash($_POST['shipping_data']), true) : array();
-        $hash = isset($_GET['hash']) ? sanitize_text_field($_GET['hash']) : '';
-        $timestamp = isset($_GET['timestamp']) ? intval($_GET['timestamp']) : 0;
+        // Get the order
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            throw new Exception('Order not found');
+        }
         
-        wpppc_log("Express Checkout: Shipping callback for order #$order_id, PayPal order $paypal_order_id");
-        wpppc_log("Express Checkout: Shipping data: " . json_encode($shipping_data));
+        // Get server ID from order
+        $server_id = get_post_meta($order->get_id(), '_wpppc_server_id', true);
+        if (!$server_id) {
+            throw new Exception('Server ID not found for order');
+        }
         
-        // Send response headers early
-        status_header(200);
-        header('Content-Type: application/json');
+        // Get server
+        $server_manager = WPPPC_Server_Manager::get_instance();
+        $server = $server_manager->get_server($server_id);
         
-        try {
-            // Validate essential data
-            if (!$order_id || !$paypal_order_id || empty($shipping_data)) {
-                throw new Exception('Missing required data');
-            }
+        if (!$server) {
+            throw new Exception('PayPal server not found');
+        }
+        
+        // Verify security hash
+        $expected_hash = hash_hmac('sha256', $timestamp . $order_id . $paypal_order_id . $server->api_key, $server->api_secret);
+        if (!hash_equals($expected_hash, $hash)) {
+            throw new Exception('Invalid security hash');
+        }
+        
+        // Extract address from shipping data
+        $address = isset($shipping_data['address']) ? $shipping_data['address'] : array();
+        
+        if (empty($address)) {
+            throw new Exception('No shipping address provided');
+        }
+        
+        // Format the address for WooCommerce
+        $shipping_address = array(
+            'first_name' => isset($shipping_data['name']['given_name']) ? $shipping_data['name']['given_name'] : '',
+            'last_name'  => isset($shipping_data['name']['surname']) ? $shipping_data['name']['surname'] : '',
+            'company'    => '',
+            'address_1'  => isset($address['address_line_1']) ? $address['address_line_1'] : '',
+            'address_2'  => isset($address['address_line_2']) ? $address['address_line_2'] : '',
+            'city'       => isset($address['admin_area_2']) ? $address['admin_area_2'] : '',
+            'state'      => isset($address['admin_area_1']) ? $address['admin_area_1'] : '',
+            'postcode'   => isset($address['postal_code']) ? $address['postal_code'] : '',
+            'country'    => isset($address['country_code']) ? $address['country_code'] : '',
+        );
+        
+        wpppc_log("Express Checkout: Formatted shipping address: " . json_encode($shipping_address));
+        
+        // Set shipping address on order
+        $order->set_address($shipping_address, 'shipping');
+        $order->save();
+        
+        // Calculate shipping options for this address
+        $shipping_options = wpppc_calculate_shipping_for_address($shipping_address);
+        
+        wpppc_log("Express Checkout: Available shipping options: " . json_encode($shipping_options));
+        
+        // If no shipping options available, add a default one
+        if (empty($shipping_options) && WC()->cart->needs_shipping()) {
+            wpppc_log("Express Checkout: No shipping methods available for this address");
             
-            // Get the order
-            $order = wc_get_order($order_id);
-            if (!$order) {
-                throw new Exception('Order not found');
-            }
-            
-            // Get server ID from order
-            $server_id = get_post_meta($order->get_id(), '_wpppc_server_id', true);
-            if (!$server_id) {
-                throw new Exception('Server ID not found for order');
-            }
-            
-            // Get server
-            $server_manager = WPPPC_Server_Manager::get_instance();
-            $server = $server_manager->get_server($server_id);
-            
-            if (!$server) {
-                throw new Exception('PayPal server not found');
-            }
-            
-            // Verify security hash
-            $expected_hash = hash_hmac('sha256', $timestamp . $order_id . $paypal_order_id . $server->api_key, $server->api_secret);
-            if (!hash_equals($expected_hash, $hash)) {
-                throw new Exception('Invalid security hash');
-            }
-            
-            // Extract address from shipping data
-            $address = isset($shipping_data['address']) ? $shipping_data['address'] : array();
-            
-            if (empty($address)) {
-                throw new Exception('No shipping address provided');
-            }
-            
-            // Format the address for WooCommerce
-            $shipping_address = array(
-                'first_name' => isset($shipping_data['name']['given_name']) ? $shipping_data['name']['given_name'] : '',
-                'last_name'  => isset($shipping_data['name']['surname']) ? $shipping_data['name']['surname'] : '',
-                'company'    => '',
-                'address_1'  => isset($address['address_line_1']) ? $address['address_line_1'] : '',
-                'address_2'  => isset($address['address_line_2']) ? $address['address_line_2'] : '',
-                'city'       => isset($address['admin_area_2']) ? $address['admin_area_2'] : '',
-                'state'      => isset($address['admin_area_1']) ? $address['admin_area_1'] : '',
-                'postcode'   => isset($address['postal_code']) ? $address['postal_code'] : '',
-                'country'    => isset($address['country_code']) ? $address['country_code'] : '',
-            );
-            
-            wpppc_log("Express Checkout: Formatted shipping address: " . json_encode($shipping_address));
-            
-            // Set shipping address on order
-            $order->set_address($shipping_address, 'shipping');
-            
-            // Set billing address too initially (will be updated at checkout if different)
-            $order->set_address($shipping_address, 'billing');
-            $order->save();
-            
-            // Create a package for shipping calculation
-            $packages = array(
-                0 => array(
-                    'contents'        => WC()->cart->get_cart(),
-                    'contents_cost'   => WC()->cart->get_cart_contents_total(),
-                    'applied_coupons' => WC()->cart->get_applied_coupons(),
-                    'destination'     => array(
-                        'country'   => $shipping_address['country'],
-                        'state'     => $shipping_address['state'],
-                        'postcode'  => $shipping_address['postcode'],
-                        'city'      => $shipping_address['city'],
-                        'address'   => $shipping_address['address_1'],
-                        'address_2' => $shipping_address['address_2']
-                    )
-                )
-            );
-            
-            // Calculate shipping for these packages
-            $shipping_options = array();
-            
-            // Clear shipping rates cache
-            WC()->shipping()->reset_shipping();
-            
-            // Calculate shipping for this package
-            $shipping_methods = WC()->shipping()->calculate_shipping($packages);
-            
-            wpppc_log("Express Checkout: Calculated shipping methods: " . json_encode($shipping_methods));
-            
-            // Format shipping options for PayPal
-            foreach ($shipping_methods[0]['rates'] as $method_id => $method) {
-                $shipping_options[] = array(
-                    'id'     => $method_id,
-                    'label'  => $method->get_label(),
-                    'cost'   => $method->get_cost(),
-                    'tax'    => $method->get_shipping_tax(),
-                );
-            }
-            
-            wpppc_log("Express Checkout: Available shipping options: " . json_encode($shipping_options));
-            
-            // If no shipping options available, add a default one
-            if (empty($shipping_options) && WC()->cart->needs_shipping()) {
-                wpppc_log("Express Checkout: No shipping methods available for this address");
-                
-                // Return an error response to PayPal
-                echo json_encode(array(
-                    'success' => false,
-                    'error' => 'NO_SHIPPING_OPTIONS',
-                    'message' => 'No shipping options available for this address'
-                ));
-                exit;
-            }
-            
-            // Prepare response for proxy server
-            $response = array(
-                'success' => true,
-                'shipping_options' => $shipping_options,
-                'order_id' => $order_id,
-                'paypal_order_id' => $paypal_order_id
-            );
-            
-            wpppc_log("Express Checkout: Sending shipping options response: " . json_encode($response));
-            
-            // Send JSON response
-            echo json_encode($response);
-            exit;
-            
-        } catch (Exception $e) {
-            wpppc_log("Express Checkout: Error in shipping callback: " . $e->getMessage());
-            
-            // Return error response
+            // Return an error response to PayPal
             echo json_encode(array(
                 'success' => false,
-                'message' => $e->getMessage()
+                'error' => 'NO_SHIPPING_OPTIONS',
+                'message' => 'No shipping options available for this address'
             ));
             exit;
         }
+        
+        // Prepare response for proxy server
+        $response = array(
+            'success' => true,
+            'shipping_options' => $shipping_options,
+            'order_id' => $order_id,
+            'paypal_order_id' => $paypal_order_id
+        );
+        
+        wpppc_log("Express Checkout: Sending shipping options response: " . json_encode($response));
+        
+        // Send JSON response
+        echo json_encode($response);
+        exit;
+        
+    } catch (Exception $e) {
+        wpppc_log("Express Checkout: Error in shipping callback: " . $e->getMessage());
+        
+        // Return error response
+        echo json_encode(array(
+            'success' => false,
+            'message' => $e->getMessage()
+        ));
+        exit;
     }
+}
     
     /**
      * AJAX handler for completing an Express Checkout order
