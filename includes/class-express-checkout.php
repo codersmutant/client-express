@@ -279,17 +279,18 @@ public function ajax_create_express_order() {
         
         // Create order data for proxy server - THIS IS THE PART THAT NEEDS TO BE FIXED
         $order_data = array(
-            'order_id' => $order->get_id(),
-            'order_key' => $order->get_order_key(),
-            'line_items' => $line_items,
-            'cart_total' => $order->get_total(),
-            'currency' => $order->get_currency(),
-            'return_url' => wc_get_checkout_url(),
-            'cancel_url' => wc_get_cart_url(),
-            'callback_url' => WC()->api_request_url('wpppc_shipping'),
-            'needs_shipping' => WC()->cart->needs_shipping(),
-            'server_id' => $server->id
-        );
+    'order_id' => $order->get_id(),
+    'order_key' => $order->get_order_key(),
+    'line_items' => $line_items,
+    'cart_total' => $order->get_total(),
+    'order_total' => $order->get_total(), 
+    'currency' => $order->get_currency(),
+    'return_url' => wc_get_checkout_url(),
+    'cancel_url' => wc_get_cart_url(),
+    'callback_url' => WC()->api_request_url('wpppc_shipping'),
+    'needs_shipping' => WC()->cart->needs_shipping(),
+    'server_id' => $server->id
+);
         
         // Encode the order data to base64
         $order_data_encoded = base64_encode(json_encode($order_data));
