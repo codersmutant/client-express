@@ -141,8 +141,8 @@ class WPPPC_Express_Checkout {
         ));
     }
     
-    /**
- * AJAX handler for creating a PayPal order for Express Checkout - FIXED VERSION
+/**
+ * AJAX handler for creating a PayPal order for Express Checkout
  */
 public function ajax_create_express_order() {
     check_ajax_referer('wpppc-express-nonce', 'nonce');
@@ -259,45 +259,66 @@ public function ajax_create_express_order() {
         // Store server ID in order
         update_post_meta($order->get_id(), '_wpppc_server_id', $server->id);
         
-        // Prepare line items for PayPal
+        // Prepare line items for PayPal with detailed information
         $line_items = array();
         
         foreach ($order->get_items() as $item) {
             $product = $item->get_product();
+            
+            if (!$product) continue;
+            
             $line_items[] = array(
                 'name' => $item->get_name(),
                 'quantity' => $item->get_quantity(),
                 'unit_price' => $order->get_item_subtotal($item, false),
                 'tax_amount' => $item->get_total_tax(),
                 'sku' => $product ? $product->get_sku() : '',
-                'product_id' => $product ? $product->get_id() : 0
+                'product_id' => $product ? $product->get_id() : 0,
+                'description' => $product ? wp_trim_words($product->get_short_description(), 15) : ('Product ID: ' . $product->get_id())
             );
         }
         
-        // Pass server ID to the mapping function
-        $line_items = add_product_mappings_to_items($line_items, $server->id);
+        // Pass server ID to the mapping function if applicable
+        if (function_exists('add_product_mappings_to_items')) {
+            $line_items = add_product_mappings_to_items($line_items, $server->id);
+        }
         
-        // Create order data for proxy server - THIS IS THE PART THAT NEEDS TO BE FIXED
+        // Get customer information if available
+        $customer_info = array();
+        if (is_user_logged_in()) {
+            $current_user = wp_get_current_user();
+            $customer_info = array(
+                'first_name' => $current_user->first_name,
+                'last_name' => $current_user->last_name,
+                'email' => $current_user->user_email
+            );
+        }
+        
+        // Create order data for proxy server with COMPLETE information
         $order_data = array(
-    'order_id' => $order->get_id(),
-    'order_key' => $order->get_order_key(),
-    'line_items' => $line_items,
-    'cart_total' => $order->get_total(),
-    'order_total' => $order->get_total(), 
-    'currency' => $order->get_currency(),
-    'return_url' => wc_get_checkout_url(),
-    'cancel_url' => wc_get_cart_url(),
-    'callback_url' => WC()->api_request_url('wpppc_shipping'),
-    'needs_shipping' => WC()->cart->needs_shipping(),
-    'server_id' => $server->id
-);
+            'order_id' => $order->get_id(),
+            'order_key' => $order->get_order_key(),
+            'line_items' => $line_items,
+            'cart_total' => $order->get_subtotal(),
+            'order_total' => $order->get_total(),
+            'tax_total' => $order->get_total_tax(),
+            'shipping_total' => $order->get_shipping_total(),
+            'discount_total' => $order->get_discount_total(),
+            'currency' => $order->get_currency(),
+            'return_url' => wc_get_checkout_url(),
+            'cancel_url' => wc_get_cart_url(),
+            'callback_url' => WC()->api_request_url('wpppc_shipping'),
+            'needs_shipping' => WC()->cart->needs_shipping(),
+            'server_id' => $server->id,
+            'customer_info' => $customer_info
+        );
         
         // Encode the order data to base64
         $order_data_encoded = base64_encode(json_encode($order_data));
         
         // Generate security hash
         $timestamp = time();
-        $hash_data = $timestamp . $order->get_id() . $server->api_key;
+        $hash_data = $timestamp . $order->get_id() . $order->get_total() . $server->api_key;
         $hash = hash_hmac('sha256', $hash_data, $server->api_secret);
         
         // Create request data with proper format for proxy server
@@ -305,7 +326,7 @@ public function ajax_create_express_order() {
             'api_key' => $server->api_key,
             'timestamp' => $timestamp,
             'hash' => $hash,
-            'order_data' => $order_data_encoded  // Use the correct parameter name
+            'order_data' => $order_data_encoded
         );
         
         wpppc_log("Express Checkout: Sending properly formatted request to proxy server");
@@ -371,7 +392,7 @@ public function ajax_create_express_order() {
 }
     
 /**
- * AJAX handler for updating shipping methods - FIXED VERSION
+ * AJAX handler for updating shipping methods with proper tax handling
  */
 public function ajax_update_shipping_methods() {
     check_ajax_referer('wpppc-express-nonce', 'nonce');
@@ -427,31 +448,146 @@ public function ajax_update_shipping_methods() {
             wpppc_log("Express Checkout: Calculated " . count($shipping_options) . " shipping options");
         }
         
+        // Variable to hold the selected shipping cost and tax
+        $selected_shipping_cost = 0;
+        $selected_shipping_tax = 0;
+        $selected_option = null;
+        
         // If we have a selected shipping method, use it
         if (!empty($selected_shipping_method) && isset($shipping_options)) {
             // Find the selected method in options
-            $selected_option = null;
             foreach ($shipping_options as $option) {
                 if ($option['id'] == $selected_shipping_method) {
                     $selected_option = $option;
+                    $selected_shipping_cost = floatval($option['cost']);
+                    
+                    // Store shipping tax if available
+                    if (isset($option['tax'])) {
+                        $selected_shipping_tax = floatval($option['tax']);
+                        wpppc_log("Express Checkout: Selected shipping option tax: " . $selected_shipping_tax);
+                    }
+                    
+                    wpppc_log("Express Checkout: Selected shipping option: " . $option['label'] . " (Cost: " . $selected_shipping_cost . ")");
                     break;
                 }
             }
+        }
+        // If no shipping method selected but we have options, use the first one
+        elseif (empty($selected_shipping_method) && !empty($shipping_options)) {
+            $selected_option = $shipping_options[0];
+            $selected_shipping_method = $selected_option['id'];
+            $selected_shipping_cost = floatval($selected_option['cost']);
             
-            if ($selected_option) {
-                wpppc_log("Express Checkout: Selected shipping option: " . $selected_option['label'] . " (" . $selected_option['cost'] . ")");
+            // Store shipping tax if available
+            if (isset($selected_option['tax'])) {
+                $selected_shipping_tax = floatval($selected_option['tax']);
+                wpppc_log("Express Checkout: First shipping option tax: " . $selected_shipping_tax);
             }
+            
+            wpppc_log("Express Checkout: No method selected, using first option: " . $selected_option['label'] . " (Cost: " . $selected_shipping_cost . ")");
         }
         
-        // Prepare inner request data with real shipping data
+        // Add the selected shipping method to the order if found
+        if ($selected_option) {
+            // Remove any existing shipping items
+            foreach ($order->get_items('shipping') as $item) {
+                $item->delete();
+            }
+            
+            // Add new shipping item
+            $item = new WC_Order_Item_Shipping();
+            $item->set_props(array(
+                'method_title' => $selected_option['label'],
+                'method_id'    => $selected_option['method_id'],
+                'instance_id'  => $selected_option['instance_id'],
+                'total'        => $selected_shipping_cost,
+                'taxes'        => isset($selected_option['taxes']) ? $selected_option['taxes'] : array()
+            ));
+            
+            $order->add_item($item);
+            $order->calculate_totals();
+            $order->save();
+            
+            wpppc_log("Express Checkout: Updated order with shipping method: " . $selected_option['label']);
+        }
+        
+        // Get updated order totals
+        $order_subtotal = $order->get_subtotal();
+        $order_shipping_tax = $order->get_shipping_tax();
+        $order_item_tax = $order->get_cart_tax();
+        $order_total_tax = $order->get_total_tax(); // This should include both item tax and shipping tax
+        $shipping_total = $order->get_shipping_total();
+        $discount_total = $order->get_discount_total();
+        $order_total = $order->get_total();
+        
+        wpppc_log("Express Checkout: Order tax breakdown - Item tax: $order_item_tax, Shipping tax: $order_shipping_tax, Total tax: $order_total_tax");
+        
+        // If there's a mismatch between shipping tax in order and in shipping option, log it
+        if (abs($order_shipping_tax - $selected_shipping_tax) > 0.01 && $selected_shipping_tax > 0) {
+            wpppc_log("Express Checkout: WARNING - Shipping tax mismatch. Order: $order_shipping_tax, Option: $selected_shipping_tax. Using option tax.");
+            // Use the shipping tax from the option
+            $order_total_tax = $order_item_tax + $selected_shipping_tax;
+            
+            // Recalculate order total for consistency
+            $order_total = $order_subtotal + $shipping_total + $order_total_tax - $discount_total;
+            
+            wpppc_log("Express Checkout: Adjusted total tax to: $order_total_tax and total to: $order_total");
+        }
+        
+        // CRITICAL: Ensure shipping tax is included in total tax if not already
+        if ($order_total_tax < ($order_item_tax + $selected_shipping_tax) && $selected_shipping_tax > 0) {
+            wpppc_log("Express Checkout: Adding shipping tax to total tax. Before: $order_total_tax");
+            $order_total_tax = $order_item_tax + $selected_shipping_tax;
+            wpppc_log("Express Checkout: After: $order_total_tax");
+            
+            // Recalculate order total to include shipping tax
+            $order_total = $order_subtotal + $shipping_total + $order_total_tax - $discount_total;
+            wpppc_log("Express Checkout: Adjusted total to: $order_total");
+        }
+        
+        // CRITICAL: Make sure shipping_total matches the selected option's cost
+        if (abs($shipping_total - $selected_shipping_cost) > 0.01) {
+            wpppc_log("Express Checkout: WARNING - Order shipping total ($shipping_total) doesn't match selected option cost ($selected_shipping_cost). Using selected option cost.");
+            $shipping_total = $selected_shipping_cost;
+            
+            // Recalculate order total for consistency
+            $order_total = $order_subtotal + $shipping_total + $order_total_tax - $discount_total;
+            wpppc_log("Express Checkout: Adjusted total to: $order_total");
+        }
+        
+        wpppc_log("Express Checkout: Final order totals - Subtotal: $order_subtotal, Tax: $order_total_tax, Shipping: $shipping_total, Discount: $discount_total, Total: $order_total");
+        
+        // Prepare line items for PayPal with detailed information
+        $line_items = array();
+        
+        foreach ($order->get_items() as $item) {
+            $product = $item->get_product();
+            $line_items[] = array(
+                'name' => $item->get_name(),
+                'quantity' => $item->get_quantity(),
+                'unit_price' => $order->get_item_subtotal($item, false),
+                'tax_amount' => $item->get_total_tax(),
+                'sku' => $product ? $product->get_sku() : '',
+                'product_id' => $product ? $product->get_id() : 0,
+                'description' => $product ? wp_trim_words($product->get_short_description(), 15) : ('Product ID: ' . $item->get_product_id())
+            );
+        }
+        
+        // Prepare complete shipping data for proxy server
         $shipping_data = array(
             'order_id' => $order_id,
             'paypal_order_id' => $paypal_order_id,
-            'shipping_method' => !empty($selected_option) ? $selected_option['id'] : (!empty($selected_shipping_method) ? $selected_shipping_method : null),
-            'order_total' => $order->get_total(),
+            'shipping_method' => $selected_shipping_method,
+            'shipping_options' => isset($shipping_options) ? $shipping_options : array(),
+            'order_subtotal' => $order_subtotal,
+            'tax_total' => $order_total_tax, // Using the correctly calculated total tax
+            'shipping_total' => $shipping_total,
+            'shipping_tax' => $selected_shipping_tax, // Add shipping tax explicitly
+            'discount_total' => $discount_total,
+            'order_total' => $order_total,
             'currency' => $order->get_currency(),
             'server_id' => $server_id,
-            'shipping_options' => isset($shipping_options) ? $shipping_options : array()
+            'line_items' => $line_items
         );
         
         // Encode the shipping data
@@ -470,8 +606,7 @@ public function ajax_update_shipping_methods() {
             'request_data' => $request_data_encoded
         );
         
-        // Log the data we're sending
-        wpppc_log("Express Checkout: Sending shipping update to proxy server: " . json_encode($request_data));
+        wpppc_log("Express Checkout: Sending shipping update to proxy server with complete data");
         
         // Send request to proxy server
         $response = wp_remote_post(
@@ -510,6 +645,7 @@ public function ajax_update_shipping_methods() {
         
         // Return success with shipping options if available
         $response_data = array(
+            'success' => true,
             'message' => __('Shipping method updated', 'woo-paypal-proxy-client')
         );
         
@@ -652,126 +788,128 @@ public function handle_shipping_callback() {
 }
     
     /**
-     * AJAX handler for completing an Express Checkout order
-     */
-    public function ajax_complete_express_order() {
-        check_ajax_referer('wpppc-express-nonce', 'nonce');
-        
-        $order_id = isset($_POST['order_id']) ? intval($_POST['order_id']) : 0;
-        $paypal_order_id = isset($_POST['paypal_order_id']) ? sanitize_text_field($_POST['paypal_order_id']) : '';
-        
-        wpppc_log("Express Checkout: Completing order #$order_id, PayPal order $paypal_order_id");
-        
-        try {
-            // Get order
-            $order = wc_get_order($order_id);
-            if (!$order) {
-                throw new Exception(__('Order not found', 'woo-paypal-proxy-client'));
-            }
-            
-            // Get server ID from order
-            $server_id = get_post_meta($order->get_id(), '_wpppc_server_id', true);
-            if (!$server_id) {
-                throw new Exception(__('Server ID not found for order', 'woo-paypal-proxy-client'));
-            }
-            
-            // Get server
-            $server_manager = WPPPC_Server_Manager::get_instance();
-            $server = $server_manager->get_server($server_id);
-            
-            if (!$server) {
-                throw new Exception(__('PayPal server not found', 'woo-paypal-proxy-client'));
-            }
-            
-            // Create request data for proxy server
-            $request_data = array(
-                'action' => 'capture_express_payment',
-                'order_id' => $order_id,
-                'paypal_order_id' => $paypal_order_id,
-                'server_id' => $server_id
-            );
-            
-            // Generate security hash
-            $timestamp = time();
-            $hash_data = $timestamp . $order_id . $paypal_order_id . $server->api_key;
-            $hash = hash_hmac('sha256', $hash_data, $server->api_secret);
-            
-            // Add security parameters
-            $request_data['timestamp'] = $timestamp;
-            $request_data['hash'] = $hash;
-            $request_data['api_key'] = $server->api_key;
-            
-            // Log the data we're sending
-            wpppc_log("Express Checkout: Sending capture request to proxy server: " . json_encode($request_data));
-            
-            // Send request to proxy server
-            $response = wp_remote_post(
-                $server->url . '/wp-json/wppps/v1/capture-express-payment',
-                array(
-                    'timeout' => 30,
-                    'headers' => array('Content-Type' => 'application/json'),
-                    'body' => json_encode($request_data)
-                )
-            );
-            
-            // Check for errors
-            if (is_wp_error($response)) {
-                wpppc_log("Express Checkout: Error communicating with proxy server: " . $response->get_error_message());
-                throw new Exception(__('Error communicating with proxy server: ', 'woo-paypal-proxy-client') . $response->get_error_message());
-            }
-            
-            // Get response code
-            $response_code = wp_remote_retrieve_response_code($response);
-            if ($response_code !== 200) {
-                wpppc_log("Express Checkout: Proxy server returned error code: $response_code");
-                throw new Exception(__('Proxy server returned error', 'woo-paypal-proxy-client'));
-            }
-            
-            // Parse response
-            $body = json_decode(wp_remote_retrieve_body($response), true);
-            
-            if (!$body || !isset($body['success']) || $body['success'] !== true) {
-                $error_message = isset($body['message']) ? $body['message'] : __('Unknown error from proxy server', 'woo-paypal-proxy-client');
-                wpppc_log("Express Checkout: Proxy server error: $error_message");
-                throw new Exception($error_message);
-            }
-            
-            // Get transaction ID from response
-            $transaction_id = isset($body['transaction_id']) ? $body['transaction_id'] : '';
-            
-            // Update order with transaction ID and complete payment
-            if (!empty($transaction_id)) {
-                $order->payment_complete($transaction_id);
-                $order->add_order_note(sprintf(__('Payment completed via PayPal Express Checkout. Transaction ID: %s', 'woo-paypal-proxy-client'), $transaction_id));
-                update_post_meta($order->get_id(), '_paypal_transaction_id', $transaction_id);
-                
-                // Get the order total amount for usage tracking
-                $order_amount = floatval($order->get_total());
-                
-                // Add to server usage
-                $result = $server_manager->add_server_usage($server_id, $order_amount);
-                wpppc_log("Express Checkout: Added $order_amount to server usage for server ID $server_id. Result: " . ($result ? "success" : "failed"));
-            }
-            
-            // Empty the cart
-            WC()->cart->empty_cart();
-            
-            wpppc_log("Express Checkout: Order #$order_id completed successfully");
-            
-            // Return success with redirect URL
-            wp_send_json_success(array(
-                'redirect' => $order->get_checkout_order_received_url()
-            ));
-            
-        } catch (Exception $e) {
-            wpppc_log("Express Checkout: Error completing order: " . $e->getMessage());
-            wp_send_json_error(array(
-                'message' => $e->getMessage()
-            ));
+ * AJAX handler for completing an Express Checkout order
+ */
+public function ajax_complete_express_order() {
+    check_ajax_referer('wpppc-express-nonce', 'nonce');
+    
+    $order_id = isset($_POST['order_id']) ? intval($_POST['order_id']) : 0;
+    $paypal_order_id = isset($_POST['paypal_order_id']) ? sanitize_text_field($_POST['paypal_order_id']) : '';
+    
+    wpppc_log("Express Checkout: Completing order #$order_id, PayPal order $paypal_order_id");
+    
+    try {
+        // Get order
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            throw new Exception(__('Order not found', 'woo-paypal-proxy-client'));
         }
         
-        wp_die();
+        // Get server ID from order
+        $server_id = get_post_meta($order->get_id(), '_wpppc_server_id', true);
+        if (!$server_id) {
+            throw new Exception(__('Server ID not found for order', 'woo-paypal-proxy-client'));
+        }
+        
+        // Get server
+        $server_manager = WPPPC_Server_Manager::get_instance();
+        $server = $server_manager->get_server($server_id);
+        
+        if (!$server) {
+            throw new Exception(__('PayPal server not found', 'woo-paypal-proxy-client'));
+        }
+        
+        // Create request data for proxy server
+        $request_data = array(
+            'order_id' => $order_id,
+            'paypal_order_id' => $paypal_order_id,
+            'server_id' => $server_id,
+            'api_key' => $server->api_key
+        );
+        
+        // Generate security hash
+        $timestamp = time();
+        $hash_data = $timestamp . $order_id . $paypal_order_id . $server->api_key;
+        $hash = hash_hmac('sha256', $hash_data, $server->api_secret);
+        
+        // Add security parameters
+        $request_data['timestamp'] = $timestamp;
+        $request_data['hash'] = $hash;
+        
+        // Log the data we're sending
+        wpppc_log("Express Checkout: Sending capture request to proxy server: " . json_encode($request_data));
+        
+        // Send request to proxy server
+        $response = wp_remote_post(
+            $server->url . '/wp-json/wppps/v1/capture-express-payment',
+            array(
+                'timeout' => 30,
+                'headers' => array('Content-Type' => 'application/json'),
+                'body' => json_encode($request_data)
+            )
+        );
+        
+        // Check for errors
+        if (is_wp_error($response)) {
+            wpppc_log("Express Checkout: Error communicating with proxy server: " . $response->get_error_message());
+            throw new Exception(__('Error communicating with proxy server: ', 'woo-paypal-proxy-client') . $response->get_error_message());
+        }
+        
+        // Get response code
+        $response_code = wp_remote_retrieve_response_code($response);
+        if ($response_code !== 200) {
+            wpppc_log("Express Checkout: Proxy server returned error code: $response_code");
+            wpppc_log("Express Checkout: Response body: " . wp_remote_retrieve_body($response));
+            throw new Exception(__('Proxy server returned error', 'woo-paypal-proxy-client'));
+        }
+        
+        // Parse response
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        
+        if (!$body || !isset($body['success']) || $body['success'] !== true) {
+            $error_message = isset($body['message']) ? $body['message'] : __('Unknown error from proxy server', 'woo-paypal-proxy-client');
+            wpppc_log("Express Checkout: Proxy server error: $error_message");
+            throw new Exception($error_message);
+        }
+        
+        // Get transaction ID from response
+        $transaction_id = isset($body['transaction_id']) ? $body['transaction_id'] : '';
+        $seller_protection = isset($body['seller_protection']) ? $body['seller_protection'] : 'UNKNOWN';
+        
+        // Update order with transaction ID and complete payment
+        if (!empty($transaction_id)) {
+            $order->payment_complete($transaction_id);
+            $order->add_order_note(sprintf(__('Payment completed via PayPal Express Checkout. Transaction ID: %s, Seller Protection: %s', 'woo-paypal-proxy-client'), $transaction_id, $seller_protection));
+            update_post_meta($order->get_id(), '_paypal_transaction_id', $transaction_id);
+            update_post_meta($order->get_id(), '_paypal_seller_protection', $seller_protection);
+            
+            // Get the order total amount for usage tracking
+            $order_amount = floatval($order->get_total());
+            
+            // Add to server usage
+            $result = $server_manager->add_server_usage($server_id, $order_amount);
+            wpppc_log("Express Checkout: Added $order_amount to server usage for server ID $server_id. Result: " . ($result ? "success" : "failed"));
+        }
+        
+        // Empty the cart
+        WC()->cart->empty_cart();
+        
+        wpppc_log("Express Checkout: Order #$order_id completed successfully");
+        
+        // Return success with redirect URL
+        wp_send_json_success(array(
+            'redirect' => $order->get_checkout_order_received_url()
+        ));
+        
+    } catch (Exception $e) {
+        wpppc_log("Express Checkout: Error completing order: " . $e->getMessage());
+        wp_send_json_error(array(
+            'message' => $e->getMessage()
+        ));
     }
+    
+    wp_die();
+}
     
 }
 
