@@ -379,14 +379,38 @@ function handleShippingMethodSelected(shippingMethod, container) {
     });
 }
     
-    /**
-     * Complete Express Checkout after payment approval
-     */
     function completeExpressCheckout(paymentData, container) {
-        debug('Completing express checkout with payment data', paymentData);
-        
-        // Show loading indicator
-        showLoading(container);
+    debug('Completing express checkout with payment data', paymentData);
+    
+    // Show loading indicator
+    showLoading(container);
+    showMessage('Fetching order details...', container);
+    
+    // ADDED CODE: First fetch complete order details from PayPal
+    $.ajax({
+        url: wpppc_express_params.ajax_url,
+        type: 'POST',
+        data: {
+            action: 'wpppc_fetch_paypal_order_details',
+            nonce: wpppc_express_params.nonce,
+            order_id: wcOrderId,
+            paypal_order_id: paypalOrderId
+        },
+        success: function(detailsResponse) {
+            debug('Got PayPal order details:', detailsResponse);
+            
+            // Now complete the payment
+            finalizePayment();
+        },
+        error: function(xhr, status, error) {
+            // Even if fetching details fails, try to complete the payment
+            console.error('Error fetching PayPal order details:', error);
+            finalizePayment();
+        }
+    });
+    
+    // Move the payment completion to a separate function
+    function finalizePayment() {
         showMessage('Finalizing your order...', container);
         
         // Complete the order via AJAX
@@ -424,6 +448,7 @@ function handleShippingMethodSelected(shippingMethod, container) {
             }
         });
     }
+}
     
     /**
      * Send message to the iframe
