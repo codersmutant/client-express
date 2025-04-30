@@ -226,7 +226,9 @@
         });
     }
     
-    // Update shipping options based on selected address
+/**
+ * Update shipping options for an Express Checkout order
+ */
 function updateShippingOptions(data, container) {
     debug('Updating shipping options for address', data.address);
     
@@ -258,7 +260,10 @@ function updateShippingOptions(data, container) {
             if (response.success) {
                 debug('Shipping options received', response.data);
                 
-                // Send shipping options to iframe
+                // Store the shipping options globally so we can use them later
+                window.lastShippingResponse = response.data;
+                
+                // Send shipping options to iframe for display in PayPal's UI
                 sendMessageToIframe({
                     action: 'shipping_options_available',
                     shipping_options: response.data.shipping_options || []
@@ -290,67 +295,89 @@ function updateShippingOptions(data, container) {
 }
     
     /**
-     * Handle shipping method selection
-     */
-    function handleShippingMethodSelected(shippingMethod, container) {
-        debug('Shipping method selected', shippingMethod);
-        
-        selectedShippingMethod = shippingMethod;
-        
-        // Find the selected shipping option to get its cost
-        var selectedOption = null;
-        for (var i = 0; i < orderData.shippingOptions.length; i++) {
-            if (orderData.shippingOptions[i].id === shippingMethod) {
-                selectedOption = orderData.shippingOptions[i];
-                break;
-            }
+ * Handle shipping method selection
+ */
+function handleShippingMethodSelected(shippingMethod, container) {
+    debug('Shipping method selected', shippingMethod);
+    
+    selectedShippingMethod = shippingMethod;
+    
+    // Show loading indicator
+    showLoading(container);
+    
+    // Find the selected shipping option to get its cost
+    var selectedOption = null;
+    var shippingOptions = [];
+    
+    // Get shipping options from the last API response
+    if (typeof lastShippingResponse !== 'undefined' && 
+        lastShippingResponse && 
+        lastShippingResponse.shipping_options) {
+        shippingOptions = lastShippingResponse.shipping_options;
+    }
+    
+    // Find the selected shipping option
+    for (var i = 0; i < shippingOptions.length; i++) {
+        if (shippingOptions[i].id === shippingMethod) {
+            selectedOption = shippingOptions[i];
+            debug('Found selected shipping option:', selectedOption);
+            break;
         }
-        
-        // Update order with selected shipping method
-        $.ajax({
-            url: wpppc_express_params.ajax_url,
-            type: 'POST',
-            data: {
-                action: 'wpppc_update_shipping_methods',
-                nonce: wpppc_express_params.nonce,
-                order_id: wcOrderId,
-                paypal_order_id: paypalOrderId,
-                shipping_method: shippingMethod,
-                shipping_cost: selectedOption ? selectedOption.cost : 0
-            },
-            success: function(response) {
-                if (response.success) {
-                    debug('Shipping method updated successfully');
-                    
-                    // Notify iframe of success
-                    sendMessageToIframe({
-                        action: 'shipping_method_updated'
-                    });
-                } else {
-                    debug('Error updating shipping method', response.data);
-                    
-                    // Notify iframe of error
-                    sendMessageToIframe({
-                        action: 'shipping_method_error',
-                        message: response.data.message || 'Failed to update shipping method'
-                    });
-                    
-                    showError(response.data.message || 'Failed to update shipping method', container);
+    }
+    
+    // Update order with selected shipping method
+    $.ajax({
+        url: wpppc_express_params.ajax_url,
+        type: 'POST',
+        data: {
+            action: 'wpppc_update_shipping_methods',
+            nonce: wpppc_express_params.nonce,
+            order_id: wcOrderId,
+            paypal_order_id: paypalOrderId,
+            shipping_method: shippingMethod,
+            shipping_options: shippingOptions  // FIXED: Pass all shipping options
+        },
+        success: function(response) {
+            hideLoading(container);
+            
+            if (response.success) {
+                debug('Shipping method updated successfully');
+                
+                // Save the shipping options for later use
+                if (response.shipping_options) {
+                    lastShippingResponse = response;
                 }
-            },
-            error: function() {
-                debug('AJAX error updating shipping method');
+                
+                // Notify iframe of success
+                sendMessageToIframe({
+                    action: 'shipping_method_updated'
+                });
+            } else {
+                debug('Error updating shipping method', response.data);
                 
                 // Notify iframe of error
                 sendMessageToIframe({
                     action: 'shipping_method_error',
-                    message: 'Error communicating with the server'
+                    message: response.data.message || 'Failed to update shipping method'
                 });
                 
-                showError('Error communicating with the server', container);
+                showError(response.data.message || 'Failed to update shipping method', container);
             }
-        });
-    }
+        },
+        error: function() {
+            hideLoading(container);
+            debug('AJAX error updating shipping method');
+            
+            // Notify iframe of error
+            sendMessageToIframe({
+                action: 'shipping_method_error',
+                message: 'Error communicating with the server'
+            });
+            
+            showError('Error communicating with the server', container);
+        }
+    });
+}
     
     /**
      * Complete Express Checkout after payment approval
