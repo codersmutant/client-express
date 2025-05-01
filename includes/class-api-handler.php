@@ -483,5 +483,131 @@ public function capture_express_payment($order_id, $paypal_order_id) {
     $response = $this->make_request($params);
     
     return $response;
-}
+    }
+    
+    /**
+ * Send order data to Website B for creating a mirrored order
+ * 
+ * @param WC_Order $order The WooCommerce order object
+ * @param string $paypal_order_id The PayPal order ID
+ * @param string $transaction_id The PayPal transaction ID
+ * @return array|WP_Error Response from the server or error
+ */
+public function mirror_order_to_server($order, $paypal_order_id, $transaction_id = '') {
+    if (!$order || !$paypal_order_id) {
+        return new WP_Error('invalid_order', __('Invalid order data for mirroring', 'woo-paypal-proxy-client'));
+    }
+    
+    // Prepare order data for mirroring
+    $order_data = array(
+        'order_id'         => $order->get_id(),
+        'order_key'        => $order->get_order_key(),
+        'order_total'      => $order->get_total(),
+        'currency'         => $order->get_currency(),
+        'customer_email'   => $order->get_billing_email(),
+        'customer_name'    => $order->get_billing_first_name() . ' ' . $order->get_billing_last_name(),
+        'items'            => $this->get_order_items($order),
+        'billing_address'  => array(
+            'first_name'   => $order->get_billing_first_name(),
+            'last_name'    => $order->get_billing_last_name(),
+            'company'      => $order->get_billing_company(),
+            'address_1'    => $order->get_billing_address_1(),
+            'address_2'    => $order->get_billing_address_2(),
+            'city'         => $order->get_billing_city(),
+            'state'        => $order->get_billing_state(),
+            'postcode'     => $order->get_billing_postcode(),
+            'country'      => $order->get_billing_country(),
+            'email'        => $order->get_billing_email(),
+            'phone'        => $order->get_billing_phone()
+        ),
+        'shipping_address' => array(
+            'first_name'   => $order->get_shipping_first_name(),
+            'last_name'    => $order->get_shipping_last_name(),
+            'company'      => $order->get_shipping_company(),
+            'address_1'    => $order->get_shipping_address_1(),
+            'address_2'    => $order->get_shipping_address_2(),
+            'city'         => $order->get_shipping_city(),
+            'state'        => $order->get_shipping_state(),
+            'postcode'     => $order->get_shipping_postcode(),
+            'country'      => $order->get_shipping_country(),
+        ),
+        'payment_method'   => $order->get_payment_method(),
+        'payment_method_title' => $order->get_payment_method_title(),
+        'paypal_order_id'  => $paypal_order_id,
+        'transaction_id'   => $transaction_id,
+        'site_url'         => get_site_url(),
+        'server_id'        => isset($this->server->id) ? $this->server->id : 0,
+    );
+    
+    // Include shipping items
+    $order_data['shipping_lines'] = array();
+    foreach ($order->get_items('shipping') as $item_id => $item) {
+        $order_data['shipping_lines'][] = array(
+            'method_id'    => $item->get_method_id(),
+            'method_title' => $item->get_method_title(),
+            'total'        => $item->get_total(),
+            'total_tax'    => $item->get_total_tax(),
+            'taxes'        => $item->get_taxes()
+        );
+    }
+    
+    // Include tax items
+    $order_data['tax_lines'] = array();
+    foreach ($order->get_items('tax') as $item_id => $item) {
+        $order_data['tax_lines'][] = array(
+            'rate_id'      => $item->get_rate_id(),
+            'label'        => $item->get_label(),
+            'compound'     => $item->is_compound(),
+            'tax_total'    => $item->get_tax_total(),
+            'shipping_tax_total' => $item->get_shipping_tax_total(),
+        );
+    }
+    
+    // Include fee items
+    $order_data['fee_lines'] = array();
+    foreach ($order->get_items('fee') as $item_id => $item) {
+        $order_data['fee_lines'][] = array(
+            'name'         => $item->get_name(),
+            'tax_class'    => $item->get_tax_class(),
+            'tax_status'   => $item->get_tax_status(),
+            'total'        => $item->get_total(),
+            'total_tax'    => $item->get_total_tax(),
+            'taxes'        => $item->get_taxes()
+        );
+    }
+    
+    // Include coupon items
+    $order_data['coupon_lines'] = array();
+    foreach ($order->get_items('coupon') as $item_id => $item) {
+        $order_data['coupon_lines'][] = array(
+            'code'         => $item->get_code(),
+            'discount'     => $item->get_discount(),
+            'discount_tax' => $item->get_discount_tax(),
+        );
+    }
+    
+    // Generate security hash
+    $timestamp = time();
+    $hash_data = $timestamp . $order->get_id() . $paypal_order_id . $this->server->api_key;
+    $hash = hash_hmac('sha256', $hash_data, $this->server->api_secret);
+    
+    // Encode order data
+    $encoded_data = base64_encode(json_encode($order_data));
+    
+    // Prepare request parameters
+    $params = array(
+        'rest_route'   => '/wppps/v1/mirror-order',
+        'api_key'      => $this->server->api_key,
+        'timestamp'    => $timestamp,
+        'hash'         => $hash,
+        'order_data'   => $encoded_data,
+    );
+    
+    // Send request to Website B
+    $response = $this->make_request($params);
+    
+    wpppc_log("Order mirroring response: " . print_r($response, true));
+    
+    return $response;
+    }
 }

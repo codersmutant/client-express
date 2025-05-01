@@ -1104,6 +1104,9 @@ public function ajax_complete_express_order() {
         wpppc_log("DEBUG: Express Checkout: FINAL ORDER STATE - Shipping first name: " . $final_order->get_shipping_first_name());
         wpppc_log("DEBUG: Express Checkout: FINAL ORDER STATE - Shipping address: " . $final_order->get_shipping_address_1());
         
+        $mirror_response = $api_handler->mirror_order_to_server($order, $paypal_order_id, $transaction_id);
+
+        
         // Empty the cart
         WC()->cart->empty_cart();
         

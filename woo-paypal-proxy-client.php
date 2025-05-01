@@ -809,6 +809,10 @@ function wpppc_complete_order_handler() {
         update_post_meta($order->get_id(), '_paypal_transaction_id', $transaction_id);
         update_post_meta($order->get_id(), '_paypal_seller_protection', $seller_protection);
         
+        $server_id = get_post_meta($order->get_id(), '_wpppc_server_id', true);
+        $api_handler = new WPPPC_API_Handler($server_id);
+        $mirror_response = $api_handler->mirror_order_to_server($order, $paypal_order_id, $transaction_id);
+        
         if ($server_id) {
             // Get the order total amount
             $order_amount = floatval($order->get_total());
