@@ -1036,46 +1036,41 @@ public function ajax_complete_express_order() {
             wpppc_log("DEBUG: Express Checkout: After save - Shipping first name: " . $updated_order->get_shipping_first_name());
             wpppc_log("DEBUG: Express Checkout: After save - Shipping address: " . $updated_order->get_shipping_address_1());
             
-            // Remove duplicate shipping methods - add right here
-wpppc_log("DEBUG: Express Checkout: Removing any duplicate shipping methods");
+// Fix for duplicate shipping methods - IMPROVED VERSION
+wpppc_log("DEBUG: Express Checkout: Checking for duplicate shipping methods");
 $shipping_items = $order->get_items('shipping');
 if (count($shipping_items) > 1) {
-    wpppc_log("DEBUG: Express Checkout: Found " . count($shipping_items) . " shipping methods, removing duplicates");
+    wpppc_log("DEBUG: Express Checkout: Found " . count($shipping_items) . " shipping methods, fixing duplicates");
     
-    // Find the most recent/last shipping method (keeping only one)
-    $keep_item = null;
+    // Keep only the first shipping method and remove others
+    $first_item = null;
+    $first_item_id = null;
+    
+    // First pass - find the first shipping item
     foreach ($shipping_items as $item_id => $item) {
-        $keep_item = $item;
-        wpppc_log("DEBUG: Express Checkout: Shipping method found: " . $item->get_method_title() . " - " . $item->get_total());
+        if ($first_item === null) {
+            $first_item = $item;
+            $first_item_id = $item_id;
+            wpppc_log("DEBUG: Express Checkout: Keeping shipping method: " . $item->get_method_title() . " - " . $item->get_total());
+            break; // Only need the first one
+        }
     }
     
-    // Remove all shipping methods
-    foreach ($shipping_items as $item_id => $item) {
-        wpppc_log("DEBUG: Express Checkout: Removing shipping method: " . $item->get_method_title());
-        wc_delete_order_item($item_id);
-    }
-    
-    // If we found a shipping method, add back only the last one
-    if ($keep_item) {
-        wpppc_log("DEBUG: Express Checkout: Re-adding final shipping method: " . $keep_item->get_method_title());
+    // Second pass - remove all except the first
+    if ($first_item) {
+        foreach ($shipping_items as $item_id => $item) {
+            if ($item_id !== $first_item_id) {
+                wpppc_log("DEBUG: Express Checkout: Removing duplicate shipping method: " . $item->get_method_title());
+                $order->remove_item($item_id); // Use remove_item instead of wc_delete_order_item
+            }
+        }
         
-        // Add shipping method
-        $item = new WC_Order_Item_Shipping();
-        $item->set_props(array(
-            'method_title' => $keep_item->get_method_title(),
-            'method_id'    => $keep_item->get_method_id(),
-            'instance_id'  => $keep_item->get_instance_id(),
-            'total'        => $keep_item->get_total(),
-            'taxes'        => $keep_item->get_taxes(),
-        ));
-        $order->add_item($item);
+        // Recalculate totals
+        $order->calculate_totals(false); // false = don't round at subtotal
+        $order->save();
+        
+        wpppc_log("DEBUG: Express Checkout: Fixed duplicate shipping methods");
     }
-    
-    // Recalculate totals and save
-    $order->calculate_totals();
-    $order->save();
-    
-    wpppc_log("DEBUG: Express Checkout: Finished cleaning up shipping methods");
 }
         }
         
