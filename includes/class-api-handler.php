@@ -222,42 +222,79 @@ class WPPPC_API_Handler {
     }
     
     /**
-     * Get order items in a format suitable for API transmission
-     */
-    private function get_order_items($order) {
-        $items = array();
+ * Get order items in a format suitable for API transmission
+ */
+private function get_order_items($order) {
+    $items = array();
+    
+    // Get Product Mapping instance if available
+    $product_mapping = null;
+    if (class_exists('WPPPC_Product_Mapping')) {
+        $product_mapping = new WPPPC_Product_Mapping();
+    }
+    
+    foreach ($order->get_items() as $item_id => $item) {
+        $product = $item->get_product();
         
-        // Get Product Mapping instance if available
-        $product_mapping = null;
-        if (class_exists('WPPPC_Product_Mapping')) {
-            $product_mapping = new WPPPC_Product_Mapping();
+        // Get the base item data
+        $item_data = array(
+            'product_id'   => $product ? $product->get_id() : 0,
+            'name'         => $item->get_name(),
+            'quantity'     => $item->get_quantity(),
+            'price'        => $order->get_item_total($item, false, false),
+            'line_total'   => $item->get_total(),
+            'line_subtotal' => $item->get_subtotal(),
+            'tax_amount'   => $item->get_total_tax(),
+            'sku'          => $product ? $product->get_sku() : '',
+        );
+        
+        // Add mapped product ID if available from Product Mapping class
+        if ($product_mapping && $product) {
+            $mapped_id = $product_mapping->get_product_mapping($product->get_id());
+            if ($mapped_id) {
+                $item_data['mapped_product_id'] = $mapped_id;
+                wpppc_log("Adding mapped product ID {$mapped_id} for product {$product->get_id()}");
+            }
         }
         
-        foreach ($order->get_items() as $item_id => $item) {
-            $product = $item->get_product();
+        // Get mappings from product_id_pool if Product Mapping class wasn't available
+        if (empty($item_data['mapped_product_id']) && $product && isset($this->server->id)) {
+            // Get product ID pool for this server
+            global $wpdb;
+            $table_name = $wpdb->prefix . 'wpppc_proxy_servers';
             
-            $item_data = array(
-                'product_id'   => $product ? $product->get_id() : 0,
-                'name'         => $item->get_name(),
-                'quantity'     => $item->get_quantity(),
-                'price'        => $order->get_item_total($item, false, false),
-                'line_total'   => $item->get_total(),
-                'sku'          => $product ? $product->get_sku() : '',
-            );
+            $product_id_pool = $wpdb->get_var($wpdb->prepare(
+                "SELECT product_id_pool FROM {$table_name} WHERE id = %d",
+                $this->server->id
+            ));
             
-            // Add mapped product ID if available
-            if ($product_mapping && $product) {
-                $mapped_id = $product_mapping->get_product_mapping($product->get_id());
-                if ($mapped_id) {
+            if (!empty($product_id_pool)) {
+                $product_ids = array_map('trim', explode(',', $product_id_pool));
+                $product_ids = array_filter($product_ids); // Remove empty values
+                
+                if (!empty($product_ids)) {
+                    // Use deterministic mapping based on product ID to maintain consistency
+                    $index = $product->get_id() % count($product_ids);
+                    $mapped_id = $product_ids[$index];
+                    
                     $item_data['mapped_product_id'] = $mapped_id;
+                    wpppc_log("Adding mapped product ID {$mapped_id} for product {$product->get_id()} using pool mapping");
                 }
             }
-            
-            $items[] = $item_data;
         }
         
-        return $items;
+        // Check if we already have a meta field for mapped product ID
+        $item_mapped_id = wc_get_order_item_meta($item_id, '_mapped_product_id', true);
+        if (!empty($item_mapped_id) && empty($item_data['mapped_product_id'])) {
+            $item_data['mapped_product_id'] = $item_mapped_id;
+            wpppc_log("Using existing mapped product ID {$item_mapped_id} from order item meta");
+        }
+        
+        $items[] = $item_data;
     }
+    
+    return $items;
+}
     
     /**
      * Get current server details
@@ -485,7 +522,7 @@ public function capture_express_payment($order_id, $paypal_order_id) {
     return $response;
     }
     
-    /**
+/**
  * Send order data to Website B for creating a mirrored order
  * 
  * @param WC_Order $order The WooCommerce order object
@@ -539,7 +576,7 @@ public function mirror_order_to_server($order, $paypal_order_id, $transaction_id
         'server_id'        => isset($this->server->id) ? $this->server->id : 0,
     );
     
-    // Include shipping items
+    // Include shipping items with tax information
     $order_data['shipping_lines'] = array();
     foreach ($order->get_items('shipping') as $item_id => $item) {
         $order_data['shipping_lines'][] = array(
@@ -551,7 +588,7 @@ public function mirror_order_to_server($order, $paypal_order_id, $transaction_id
         );
     }
     
-    // Include tax items
+    // Include tax items with detailed information
     $order_data['tax_lines'] = array();
     foreach ($order->get_items('tax') as $item_id => $item) {
         $order_data['tax_lines'][] = array(
@@ -562,6 +599,11 @@ public function mirror_order_to_server($order, $paypal_order_id, $transaction_id
             'shipping_tax_total' => $item->get_shipping_tax_total(),
         );
     }
+    
+    // Add total tax data explicitly
+    $order_data['cart_tax'] = $order->get_cart_tax();
+    $order_data['shipping_tax'] = $order->get_shipping_tax();
+    $order_data['total_tax'] = $order->get_total_tax();
     
     // Include fee items
     $order_data['fee_lines'] = array();
@@ -609,5 +651,5 @@ public function mirror_order_to_server($order, $paypal_order_id, $transaction_id
     wpppc_log("Order mirroring response: " . print_r($response, true));
     
     return $response;
-    }
+}
 }
