@@ -16,6 +16,9 @@ if (!defined('ABSPATH')) {
  */
 class WPPPC_Express_Checkout {
     
+    private static $buttons_added_to_cart = false;
+    private static $buttons_added_to_checkout = false;
+    
     /**
      * Constructor
      */
@@ -52,6 +55,12 @@ add_action('wp_ajax_nopriv_wpppc_fetch_paypal_order_details', array($this, 'ajax
      * Add Express Checkout button to cart page
      */
     public function add_express_checkout_button_to_cart() {
+        
+        if (self::$buttons_added_to_cart) {
+        return;
+        }
+        self::$buttons_added_to_cart = true;
+        
         // Only show if we have a server
         $server_manager = WPPPC_Server_Manager::get_instance();
         $server = $server_manager->get_selected_server();
@@ -77,6 +86,12 @@ add_action('wp_ajax_nopriv_wpppc_fetch_paypal_order_details', array($this, 'ajax
      * Add Express Checkout button to checkout page
      */
     public function add_express_checkout_button_to_checkout() {
+        
+        if (self::$buttons_added_to_checkout) {
+        return;
+        }
+        self::$buttons_added_to_checkout = true;
+        
         // Only show if we have a server
         $server_manager = WPPPC_Server_Manager::get_instance();
         $server = $server_manager->get_selected_server();
