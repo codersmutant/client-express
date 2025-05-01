@@ -40,6 +40,7 @@ class WPPPC_PayPal_Gateway extends WC_Payment_Gateway {
         
         // Initialize API handler (will use server manager to get the next available server)
         $this->api_handler = new WPPPC_API_Handler();
+        add_action('wp_head', array($this, 'add_mobile_detection_script'), 1);
         
         // Hooks
         add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
@@ -78,6 +79,15 @@ class WPPPC_PayPal_Gateway extends WC_Payment_Gateway {
                 'default'     => __('Pay securely via PayPal.', 'woo-paypal-proxy-client'),
                 'desc_tip'    => true,
             ),
+            
+            'mobile_only' => array(
+                'title'       => __('Mobile Only', 'woo-paypal-proxy-client'),
+                'type'        => 'checkbox',
+                'label'       => __('Enable only for mobile devices', 'woo-paypal-proxy-client'),
+                'default'     => 'no',
+                'description' => __('When checked, this payment method will only be available on mobile devices.', 'woo-paypal-proxy-client'),
+            ),
+            
             'servers_notice' => array(
                 'title'       => __('Server Configuration', 'woo-paypal-proxy-client'),
                 'type'        => 'title',
@@ -420,5 +430,80 @@ public function get_seller_protection($paypal_order_id, $server_id = 0) {
     error_log('Retrieved seller protection status: ' . $seller_protection);
     
     return $seller_protection;
+    }
+    
+    public function add_mobile_detection_script() {
+    // Only add if we're on cart or checkout pages
+    if (!is_cart() && !is_checkout()) {
+        return;
+    }
+    ?>
+    <script>
+    (function() {
+        const isRealMobile = navigator.maxTouchPoints > 1;
+
+        // Set cookie for future requests
+        document.cookie = "wpppc_is_real_mobile=" + (isRealMobile ? "1" : "0") + "; path=/; max-age=" + (30*86400);
+
+        // Check if we need to reload the page
+        const url = new URL(window.location.href);
+        if (!url.searchParams.has('wpppc_is_real_mobile')) {
+            // Preserve the original referrer before reload
+            const originalReferrer = document.referrer;
+            if (originalReferrer && originalReferrer !== "") {
+                // Only store if it's an external referrer
+                const currentDomain = window.location.hostname;
+                try {
+                    const referrerUrl = new URL(originalReferrer);
+                    
+                    if (referrerUrl.hostname !== currentDomain) {
+                        // It's an external referrer, store it
+                        document.cookie = "wpppc_original_referrer=" + encodeURIComponent(originalReferrer) + "; path=/; max-age=" + (30*86400);
+                    }
+                } catch(e) {
+                    // Invalid URL, ignore
+                }
+            }
+            
+            // Now reload with the mobile detection parameter
+            url.searchParams.set('wpppc_is_real_mobile', isRealMobile ? '1' : '0');
+            window.location.replace(url.toString());
+        }
+    })();
+    </script>
+    <?php
+}
+
+private function is_real_mobile_device() {
+    // First check for cookie, give it priority
+    if (isset($_COOKIE['wpppc_is_real_mobile'])) {
+        return $_COOKIE['wpppc_is_real_mobile'] === '1';
+    }
+    
+    // Only check query param if no cookie exists yet (first visit)
+    if (!isset($_COOKIE['wpppc_is_real_mobile']) && isset($_GET['wpppc_is_real_mobile'])) {
+        return $_GET['wpppc_is_real_mobile'] === '1';
+    }
+
+    return false;
+}
+
+/**
+ * Check if this gateway is available for the current request
+ */
+public function is_available() {
+    $is_available = parent::is_available();
+    
+    // If it's not available for other reasons, return false
+    if (!$is_available) {
+        return false;
+    }
+    
+    // If mobile_only is enabled, check if it's a mobile device
+    if ($this->get_option('mobile_only') === 'yes') {
+        return $this->is_real_mobile_device();
+    }
+    
+    return true;
 }
 }

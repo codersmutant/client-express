@@ -24,7 +24,7 @@ class WPPPC_Express_Checkout {
      */
     public function __construct() {
         // Add PayPal buttons to cart page
-        add_action('woocommerce_proceed_to_checkout', array($this, 'add_express_checkout_button_to_cart'), 20);
+        //add_action('woocommerce_proceed_to_checkout', array($this, 'add_express_checkout_button_to_cart'), 20);
         
         // Add PayPal buttons to checkout page before customer details
         add_action('woocommerce_before_checkout_form', array($this, 'add_express_checkout_button_to_checkout'), 10);
@@ -55,6 +55,9 @@ add_action('wp_ajax_nopriv_wpppc_fetch_paypal_order_details', array($this, 'ajax
      * Add Express Checkout button to cart page
      */
     public function add_express_checkout_button_to_cart() {
+        if (!$this->should_display_for_device()) {
+        return;
+        }
         
         if (self::$buttons_added_to_cart) {
         return;
@@ -86,6 +89,9 @@ add_action('wp_ajax_nopriv_wpppc_fetch_paypal_order_details', array($this, 'ajax
      * Add Express Checkout button to checkout page
      */
     public function add_express_checkout_button_to_checkout() {
+         if (!$this->should_display_for_device()) {
+        return;
+        }
         
         if (self::$buttons_added_to_checkout) {
         return;
@@ -1473,6 +1479,32 @@ public function ajax_fetch_paypal_order_details() {
     }
     
     wp_die();
+}
+
+/**
+ * Check if express checkout should be displayed based on device
+ */
+private function should_display_for_device() {
+    // Get the PayPal gateway settings
+    $gateway_settings = get_option('woocommerce_paypal_proxy_settings', array());
+    
+    // Check if mobile-only is enabled
+    if (isset($gateway_settings['mobile_only']) && $gateway_settings['mobile_only'] === 'yes') {
+        // First check for cookie
+        if (isset($_COOKIE['wpppc_is_real_mobile'])) {
+            return $_COOKIE['wpppc_is_real_mobile'] === '1';
+        }
+        
+        // Then check URL parameter
+        if (isset($_GET['wpppc_is_real_mobile'])) {
+            return $_GET['wpppc_is_real_mobile'] === '1';
+        }
+        
+        return false;
+    }
+    
+    // If mobile-only is not enabled, always display
+    return true;
 }
     
 }
