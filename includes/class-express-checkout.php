@@ -1146,24 +1146,24 @@ $shipping_items = $order->get_items('shipping');
 if (count($shipping_items) > 1) {
     wpppc_log("DEBUG: Express Checkout: Found " . count($shipping_items) . " shipping methods, fixing duplicates");
     
-    // Keep only the first shipping method and remove others
-    $first_item = null;
-    $first_item_id = null;
+    // Keep only the LAST shipping method and remove others
+    $last_item = null;
+    $last_item_id = null;
     
-    // First pass - find the first shipping item
+    // First pass - find the LAST shipping item
     foreach ($shipping_items as $item_id => $item) {
-        if ($first_item === null) {
-            $first_item = $item;
-            $first_item_id = $item_id;
-            wpppc_log("DEBUG: Express Checkout: Keeping shipping method: " . $item->get_method_title() . " - " . $item->get_total());
-            break; // Only need the first one
-        }
+        // Always update - this will end up with the last one
+        $last_item = $item;
+        $last_item_id = $item_id;
+        // No break here - we want to iterate through all items
     }
     
-    // Second pass - remove all except the first
-    if ($first_item) {
+    wpppc_log("DEBUG: Express Checkout: Keeping last shipping method: " . $last_item->get_method_title() . " - " . $last_item->get_total());
+    
+    // Second pass - remove all except the last
+    if ($last_item) {
         foreach ($shipping_items as $item_id => $item) {
-            if ($item_id !== $first_item_id) {
+            if ($item_id !== $last_item_id) {
                 wpppc_log("DEBUG: Express Checkout: Removing duplicate shipping method: " . $item->get_method_title());
                 $order->remove_item($item_id); // Use remove_item instead of wc_delete_order_item
             }
@@ -1173,7 +1173,7 @@ if (count($shipping_items) > 1) {
         $order->calculate_totals(false); // false = don't round at subtotal
         $order->save();
         
-        wpppc_log("DEBUG: Express Checkout: Fixed duplicate shipping methods");
+        wpppc_log("DEBUG: Express Checkout: Fixed duplicate shipping methods by keeping the last (most recently selected) one");
     }
 }
         }
