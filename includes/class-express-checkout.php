@@ -51,10 +51,26 @@ add_action('wp_ajax_wpppc_fetch_paypal_order_details', array($this, 'ajax_fetch_
 add_action('wp_ajax_nopriv_wpppc_fetch_paypal_order_details', array($this, 'ajax_fetch_paypal_order_details'));
     }
     
+    
+    /**
+     * Check if PayPal gateway is enabled
+     */
+    private function is_gateway_enabled() {
+        // Get the PayPal gateway settings
+        $gateway_settings = get_option('woocommerce_paypal_proxy_settings', array());
+        
+        // Check if enabled
+        return isset($gateway_settings['enabled']) && $gateway_settings['enabled'] === 'yes';
+    }
     /**
      * Add Express Checkout button to cart page
      */
     public function add_express_checkout_button_to_cart() {
+        
+        // Check if gateway is enabled - EXIT if disabled
+        if (!$this->is_gateway_enabled()) {
+            return;
+        }
         if (!$this->should_display_for_device()) {
         return;
         }
@@ -89,6 +105,11 @@ add_action('wp_ajax_nopriv_wpppc_fetch_paypal_order_details', array($this, 'ajax
      * Add Express Checkout button to checkout page
      */
     public function add_express_checkout_button_to_checkout() {
+        
+        // Check if gateway is enabled - EXIT if disabled
+        if (!$this->is_gateway_enabled()) {
+            return;
+        }
          if (!$this->should_display_for_device()) {
         return;
         }
@@ -123,6 +144,11 @@ add_action('wp_ajax_nopriv_wpppc_fetch_paypal_order_details', array($this, 'ajax
      * Enqueue scripts and styles for Express Checkout
      */
     public function enqueue_scripts() {
+        
+        // Check if gateway is enabled - EXIT if disabled
+        if (!$this->is_gateway_enabled()) {
+            return;
+        }
         if (!is_cart() && !is_checkout()) {
             return;
         }
