@@ -744,6 +744,13 @@ public function handle_shipping_callback() {
         // Extract address from shipping data
         $address = isset($shipping_data['address']) ? $shipping_data['address'] : array();
         
+        // Extract selected shipping method if available (from PayPal data)
+        $selected_shipping_method = null;
+        if (isset($shipping_data['selected_shipping_option']) && isset($shipping_data['selected_shipping_option']['id'])) {
+            $selected_shipping_method = $shipping_data['selected_shipping_option']['id'];
+            wpppc_log("Express Checkout: Selected shipping method from PayPal: " . $selected_shipping_method);
+        }
+        
         if (empty($address)) {
             throw new Exception('No shipping address provided');
         }
@@ -767,7 +774,7 @@ public function handle_shipping_callback() {
         $order->set_address($shipping_address, 'shipping');
         $order->save();
         
-        // NEW CODE: Store shipping address for later use (in case it gets lost)
+        // Store shipping address for later use (in case it gets lost)
         $this->store_shipping_address($order_id, $shipping_address);
         
         // Calculate shipping options for this address
@@ -788,6 +795,61 @@ public function handle_shipping_callback() {
             exit;
         }
         
+        // If we have a selected shipping method from PayPal, use it to calculate the correct total
+        $updated_breakdown = null;
+        if ($selected_shipping_method && !empty($shipping_options)) {
+            wpppc_log("Express Checkout: Updating order with selected shipping method: " . $selected_shipping_method);
+            
+            // Find the selected option
+            $selected_option = null;
+            foreach ($shipping_options as $option) {
+                if ($option['id'] === $selected_shipping_method) {
+                    $selected_option = $option;
+                    break;
+                }
+            }
+            
+            if ($selected_option) {
+                wpppc_log("Express Checkout: Found matching shipping option: " . $selected_option['label']);
+                
+                // Apply this shipping method to the order
+                $this->apply_shipping_method_to_order($order, $selected_option);
+                
+                // Get updated order totals
+                $order_subtotal = $order->get_subtotal();
+                $shipping_total = $order->get_shipping_total();
+                $tax_total = $order->get_total_tax();
+                $discount_total = $order->get_discount_total();
+                $order_total = $order->get_total();
+                $currency = $order->get_currency();
+                
+                // Create breakdown for PayPal UI
+                $updated_breakdown = array(
+                    'item_total' => array(
+                        'currency_code' => $currency,
+                        'value' => number_format($order_subtotal, 2, '.', '')
+                    ),
+                    'shipping' => array(
+                        'currency_code' => $currency,
+                        'value' => number_format($shipping_total, 2, '.', '')
+                    ),
+                    'tax_total' => array(
+                        'currency_code' => $currency,
+                        'value' => number_format($tax_total, 2, '.', '')
+                    )
+                );
+                
+                if ($discount_total > 0) {
+                    $updated_breakdown['discount'] = array(
+                        'currency_code' => $currency,
+                        'value' => number_format($discount_total, 2, '.', '')
+                    );
+                }
+                
+                wpppc_log("Express Checkout: Created updated breakdown: " . json_encode($updated_breakdown));
+            }
+        }
+        
         // Prepare response for proxy server
         $response = array(
             'success' => true,
@@ -795,6 +857,11 @@ public function handle_shipping_callback() {
             'order_id' => $order_id,
             'paypal_order_id' => $paypal_order_id
         );
+        
+        // Include breakdown if we have it
+        if ($updated_breakdown) {
+            $response['breakdown'] = $updated_breakdown;
+        }
         
         wpppc_log("Express Checkout: Sending shipping options response: " . json_encode($response));
         
@@ -812,6 +879,37 @@ public function handle_shipping_callback() {
         ));
         exit;
     }
+}
+
+/**
+ * Helper function to apply a shipping method to an order
+ */
+private function apply_shipping_method_to_order($order, $shipping_option) {
+    // Remove any existing shipping items
+    foreach ($order->get_items('shipping') as $item) {
+        $item->delete();
+    }
+    
+    // Create new shipping item
+    $item = new WC_Order_Item_Shipping();
+    $item->set_props(array(
+        'method_title' => $shipping_option['label'],
+        'method_id'    => $shipping_option['method_id'],
+        'instance_id'  => $shipping_option['instance_id'],
+        'total'        => $shipping_option['cost'],
+        'taxes'        => isset($shipping_option['taxes']) ? $shipping_option['taxes'] : array()
+    ));
+    
+    // Add item to order
+    $order->add_item($item);
+    
+    // Calculate totals
+    $order->calculate_totals();
+    $order->save();
+    
+    wpppc_log("Express Checkout: Applied shipping method '{$shipping_option['label']}' to order");
+    
+    return true;
 }
     
 /**

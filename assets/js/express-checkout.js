@@ -238,6 +238,12 @@ function updateShippingOptions(data, container) {
     // Get shipping address from data
     var shippingAddress = data.address;
     
+    // Get selected shipping method if available
+    var selectedShippingMethod = data.selectedShippingMethod || null;
+    if (selectedShippingMethod) {
+        debug('Selected shipping method included in request:', selectedShippingMethod);
+    }
+    
     // Send message to indicate we're processing
     sendMessageToIframe({
         action: 'shipping_update_processing'
@@ -252,7 +258,8 @@ function updateShippingOptions(data, container) {
             nonce: wpppc_express_params.nonce,
             order_id: wcOrderId,
             paypal_order_id: paypalOrderId,
-            shipping_address: shippingAddress
+            shipping_address: shippingAddress,
+            shipping_method: selectedShippingMethod // Pass selected method if available
         },
         success: function(response) {
             hideLoading(container);
@@ -264,10 +271,18 @@ function updateShippingOptions(data, container) {
                 window.lastShippingResponse = response.data;
                 
                 // Send shipping options to iframe for display in PayPal's UI
-                sendMessageToIframe({
+                var messageData = {
                     action: 'shipping_options_available',
                     shipping_options: response.data.shipping_options || []
-                });
+                };
+                
+                // If breakdown data is available, include it
+                if (response.data.breakdown) {
+                    messageData.breakdown = response.data.breakdown;
+                    debug('Including price breakdown in response:', response.data.breakdown);
+                }
+                
+                sendMessageToIframe(messageData);
             } else {
                 debug('Error getting shipping options', response.data);
                 
