@@ -444,6 +444,12 @@ public function ajax_create_express_order() {
 /**
  * AJAX handler for updating shipping methods with proper tax handling
  */
+/**
+ * AJAX handler for updating shipping methods with proper tax handling
+ */
+/**
+ * AJAX handler for updating shipping methods with proper cost application
+ */
 public function ajax_update_shipping_methods() {
     check_ajax_referer('wpppc-express-nonce', 'nonce');
     
@@ -489,7 +495,7 @@ public function ajax_update_shipping_methods() {
                 'country'    => isset($shipping_address['country_code']) ? $shipping_address['country_code'] : '',
             );
             
-            // Update order with this address for shipping calculation
+            // Update order with this address for calculation
             $order->set_address($formatted_address, 'shipping');
             $order->save();
             
@@ -498,24 +504,16 @@ public function ajax_update_shipping_methods() {
             wpppc_log("Express Checkout: Calculated " . count($shipping_options) . " shipping options");
         }
         
-        // Variable to hold the selected shipping cost and tax
-        $selected_shipping_cost = 0;
-        $selected_shipping_tax = 0;
+        // Variable to hold the selected shipping option and cost
         $selected_option = null;
+        $selected_shipping_cost = 0;
         
-        // If we have a selected shipping method, use it
+        // If we have a selected shipping method, find its details
         if (!empty($selected_shipping_method) && isset($shipping_options)) {
-            // Find the selected method in options
             foreach ($shipping_options as $option) {
                 if ($option['id'] == $selected_shipping_method) {
                     $selected_option = $option;
                     $selected_shipping_cost = floatval($option['cost']);
-                    
-                    // Store shipping tax if available
-                    if (isset($option['tax'])) {
-                        $selected_shipping_tax = floatval($option['tax']);
-                        wpppc_log("Express Checkout: Selected shipping option tax: " . $selected_shipping_tax);
-                    }
                     
                     wpppc_log("Express Checkout: Selected shipping option: " . $option['label'] . " (Cost: " . $selected_shipping_cost . ")");
                     break;
@@ -528,23 +526,69 @@ public function ajax_update_shipping_methods() {
             $selected_shipping_method = $selected_option['id'];
             $selected_shipping_cost = floatval($selected_option['cost']);
             
-            // Store shipping tax if available
-            if (isset($selected_option['tax'])) {
-                $selected_shipping_tax = floatval($selected_option['tax']);
-                wpppc_log("Express Checkout: First shipping option tax: " . $selected_shipping_tax);
-            }
-            
             wpppc_log("Express Checkout: No method selected, using first option: " . $selected_option['label'] . " (Cost: " . $selected_shipping_cost . ")");
         }
         
-        // Add the selected shipping method to the order if found
-        if ($selected_option) {
-            // Remove any existing shipping items
-            foreach ($order->get_items('shipping') as $item) {
-                $item->delete();
+       // CRITICAL: Apply the selected shipping method to the order
+if ($selected_option) {
+    // First, get all existing shipping items
+    $shipping_items = $order->get_items('shipping');
+    
+    // Log how many shipping items we found
+    wpppc_log("Express Checkout: Found " . count($shipping_items) . " existing shipping items");
+    
+    // Remove all existing shipping items
+    foreach ($shipping_items as $item_id => $item) {
+        wpppc_log("Express Checkout: Removing shipping item: " . $item->get_method_title() . " with cost " . $item->get_total());
+        $order->remove_item($item_id);
+    }
+    
+    // Save the order after removing items
+    $order->save();
+    
+    // Clear WC shipping cache
+    if (isset(WC()->cart)) {
+        WC()->cart->calculate_shipping();
+        WC()->cart->calculate_totals();
+    }
+    
+    // Now add the new shipping method
+    $item = new WC_Order_Item_Shipping();
+    $item->set_props(array(
+        'method_title' => $selected_option['label'],
+        'method_id'    => $selected_option['method_id'],
+        'instance_id'  => $selected_option['instance_id'],
+        'total'        => $selected_shipping_cost,
+        'taxes'        => isset($selected_option['taxes']) ? $selected_option['taxes'] : array()
+    ));
+    
+    $order->add_item($item);
+    $order->calculate_totals();
+    $order->save();
+    
+    wpppc_log("Express Checkout: Added shipping method to order with cost: " . $selected_shipping_cost);
+    
+    // Verify that only one shipping method is applied
+    $new_shipping_items = $order->get_items('shipping');
+    wpppc_log("Express Checkout: After update - order has " . count($new_shipping_items) . " shipping items");
+    
+    // Get the actual shipping total from the order
+    $actual_shipping_total = $order->get_shipping_total();
+    
+    // Check if the shipping total matches the expected cost
+    if (abs($actual_shipping_total - $selected_shipping_cost) > 0.01) {
+        wpppc_log("Express Checkout: WARNING - Shipping total mismatch after update. Expected: " . $selected_shipping_cost . ", Actual: " . $actual_shipping_total);
+        
+        // Force fix the shipping total if needed
+        if (count($new_shipping_items) > 1) {
+            wpppc_log("Express Checkout: Multiple shipping methods detected. Fixing...");
+            
+            // Remove all shipping items again
+            foreach ($new_shipping_items as $item_id => $item) {
+                $order->remove_item($item_id);
             }
             
-            // Add new shipping item
+            // Add a single shipping item with the correct cost
             $item = new WC_Order_Item_Shipping();
             $item->set_props(array(
                 'method_title' => $selected_option['label'],
@@ -555,89 +599,47 @@ public function ajax_update_shipping_methods() {
             ));
             
             $order->add_item($item);
+            
+            // Manually set the shipping total as a last resort
+            update_post_meta($order->get_id(), '_order_shipping', $selected_shipping_cost);
+            
+            // Recalculate totals
             $order->calculate_totals();
             $order->save();
             
-            wpppc_log("Express Checkout: Updated order with shipping method: " . $selected_option['label']);
+            wpppc_log("Express Checkout: Fixed shipping total. New total: " . $order->get_shipping_total());
         }
+    }
+}
         
         // Get updated order totals
         $order_subtotal = $order->get_subtotal();
-        $order_shipping_tax = $order->get_shipping_tax();
-        $order_item_tax = $order->get_cart_tax();
-        $order_total_tax = $order->get_total_tax(); // This should include both item tax and shipping tax
         $shipping_total = $order->get_shipping_total();
+        $tax_total = $order->get_total_tax();
         $discount_total = $order->get_discount_total();
         $order_total = $order->get_total();
         
-        wpppc_log("Express Checkout: Order tax breakdown - Item tax: $order_item_tax, Shipping tax: $order_shipping_tax, Total tax: $order_total_tax");
+        wpppc_log("Express Checkout: Final order totals - Subtotal: $order_subtotal, Shipping: $shipping_total, Tax: $tax_total, Discount: $discount_total, Total: $order_total");
         
-        // If there's a mismatch between shipping tax in order and in shipping option, log it
-        if (abs($order_shipping_tax - $selected_shipping_tax) > 0.01 && $selected_shipping_tax > 0) {
-            wpppc_log("Express Checkout: WARNING - Shipping tax mismatch. Order: $order_shipping_tax, Option: $selected_shipping_tax. Using option tax.");
-            // Use the shipping tax from the option
-            $order_total_tax = $order_item_tax + $selected_shipping_tax;
-            
-            // Recalculate order total for consistency
-            $order_total = $order_subtotal + $shipping_total + $order_total_tax - $discount_total;
-            
-            wpppc_log("Express Checkout: Adjusted total tax to: $order_total_tax and total to: $order_total");
-        }
-        
-        // CRITICAL: Ensure shipping tax is included in total tax if not already
-        if ($order_total_tax < ($order_item_tax + $selected_shipping_tax) && $selected_shipping_tax > 0) {
-            wpppc_log("Express Checkout: Adding shipping tax to total tax. Before: $order_total_tax");
-            $order_total_tax = $order_item_tax + $selected_shipping_tax;
-            wpppc_log("Express Checkout: After: $order_total_tax");
-            
-            // Recalculate order total to include shipping tax
-            $order_total = $order_subtotal + $shipping_total + $order_total_tax - $discount_total;
-            wpppc_log("Express Checkout: Adjusted total to: $order_total");
-        }
-        
-        // CRITICAL: Make sure shipping_total matches the selected option's cost
-        if (abs($shipping_total - $selected_shipping_cost) > 0.01) {
-            wpppc_log("Express Checkout: WARNING - Order shipping total ($shipping_total) doesn't match selected option cost ($selected_shipping_cost). Using selected option cost.");
+        // Double-check that the shipping total matches the selected option cost
+        if ($selected_option && abs($shipping_total - $selected_shipping_cost) > 0.01) {
+            wpppc_log("Express Checkout: WARNING - Order shipping total doesn't match selected option cost. Adjusting data to match.");
             $shipping_total = $selected_shipping_cost;
-            
-            // Recalculate order total for consistency
-            $order_total = $order_subtotal + $shipping_total + $order_total_tax - $discount_total;
-            wpppc_log("Express Checkout: Adjusted total to: $order_total");
         }
         
-        wpppc_log("Express Checkout: Final order totals - Subtotal: $order_subtotal, Tax: $order_total_tax, Shipping: $shipping_total, Discount: $discount_total, Total: $order_total");
-        
-        // Prepare line items for PayPal with detailed information
-        $line_items = array();
-        
-        foreach ($order->get_items() as $item) {
-            $product = $item->get_product();
-            $line_items[] = array(
-                'name' => $item->get_name(),
-                'quantity' => $item->get_quantity(),
-                'unit_price' => $order->get_item_subtotal($item, false),
-                'tax_amount' => $item->get_total_tax(),
-                'sku' => $product ? $product->get_sku() : '',
-                'product_id' => $product ? $product->get_id() : 0,
-                'description' => $product ? wp_trim_words($product->get_short_description(), 15) : ('Product ID: ' . $item->get_product_id())
-            );
-        }
-        
-        // Prepare complete shipping data for proxy server
+        // Prepare shipping data for proxy server
         $shipping_data = array(
             'order_id' => $order_id,
             'paypal_order_id' => $paypal_order_id,
             'shipping_method' => $selected_shipping_method,
             'shipping_options' => isset($shipping_options) ? $shipping_options : array(),
             'order_subtotal' => $order_subtotal,
-            'tax_total' => $order_total_tax, // Using the correctly calculated total tax
+            'tax_total' => $tax_total,
             'shipping_total' => $shipping_total,
-            'shipping_tax' => $selected_shipping_tax, // Add shipping tax explicitly
+            'shipping_tax' => $order->get_shipping_tax(),
             'discount_total' => $discount_total,
             'order_total' => $order_total,
             'currency' => $order->get_currency(),
-            'server_id' => $server_id,
-            'line_items' => $line_items
         );
         
         // Encode the shipping data
@@ -701,6 +703,11 @@ public function ajax_update_shipping_methods() {
         
         if (isset($shipping_options) && !empty($shipping_options)) {
             $response_data['shipping_options'] = $shipping_options;
+        }
+        
+        // Include breakdown if available in response
+        if (isset($body['breakdown'])) {
+            $response_data['breakdown'] = $body['breakdown'];
         }
         
         wp_send_json_success($response_data);
