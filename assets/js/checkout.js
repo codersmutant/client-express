@@ -372,7 +372,7 @@ function hideLoading() {
      */
     function handlePaymentError(error) {
         console.error('Payment error:', error);
-        displayError('general', 'PayPal error: ' + (error.message || 'Unknown error'));
+        //displayError('general', 'PayPal error: ' + (error.message || 'Unknown error'));
         
         // Reset order flags
         orderCreated = false;

@@ -1015,6 +1015,171 @@ function wpppc_calculate_shipping_for_address($address) {
 }
 
 /**
+ * Add Seller Protection column to WooCommerce orders list
+ */
+
+// Handle both traditional and HPOS order tables
+function add_seller_protection_column_handler() {
+    // Check if HPOS is enabled
+    if (class_exists('Automattic\WooCommerce\Utilities\OrderUtil') && 
+        \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled()) {
+        // HPOS (Custom Order Tables) version
+        add_filter('woocommerce_shop_order_list_table_columns', 'add_seller_protection_column_hpos');
+        add_action('woocommerce_shop_order_list_table_custom_column', 'display_seller_protection_column_hpos', 10, 2);
+    } else {
+        // Traditional posts table version
+        add_filter('manage_edit-shop_order_columns', 'add_seller_protection_column_traditional');
+        add_action('manage_shop_order_posts_custom_column', 'display_seller_protection_column_traditional', 10, 2);
+    }
+}
+add_action('admin_init', 'add_seller_protection_column_handler');
+
+// For HPOS system
+function add_seller_protection_column_hpos($columns) {
+    $new_columns = array();
+    foreach ($columns as $key => $value) {
+        if ($key === 'wc_actions') {
+            $new_columns['seller_protection'] = __('Seller Protection', 'woo-paypal-proxy-client');
+        }
+        $new_columns[$key] = $value;
+    }
+    return $new_columns;
+}
+
+function display_seller_protection_column_hpos($column, $order) {
+    if ($column === 'seller_protection') {
+        display_seller_protection_status($order);
+    }
+}
+
+// For traditional system
+function add_seller_protection_column_traditional($columns) {
+    $new_columns = array();
+    foreach ($columns as $key => $value) {
+        if ($key === 'order_actions') {
+            $new_columns['seller_protection'] = __('Seller Protection', 'woo-paypal-proxy-client');
+        }
+        $new_columns[$key] = $value;
+    }
+    return $new_columns;
+}
+
+function display_seller_protection_column_traditional($column, $post_id) {
+    if ($column === 'seller_protection') {
+        $order = wc_get_order($post_id);
+        if ($order) {
+            display_seller_protection_status($order);
+        }
+    }
+}
+
+// Shared display function - updated to check order notes as fallback
+function display_seller_protection_status($order) {
+    // First try to get from order meta
+    $seller_protection = $order->get_meta('_paypal_seller_protection', true);
+    
+    // If empty, try different method
+    if (empty($seller_protection) && is_callable(array($order, 'get_id'))) {
+        $seller_protection = get_post_meta($order->get_id(), '_paypal_seller_protection', true);
+    }
+    
+    // If still empty, extract from order notes as fallback
+    if (empty($seller_protection)) {
+        $notes = $order->get_customer_order_notes();
+        
+        // Order notes are customer-only, so we need to get all notes
+        $all_notes = wc_get_order_notes(array(
+            'order_id' => $order->get_id(),
+            'type' => ''  // Get all notes, not just customer notes
+        ));
+        
+        foreach ($all_notes as $note) {
+            if (stripos($note->content, 'Seller Protection:') !== false) {
+                // Extract the seller protection status from the note
+                if (preg_match('/Seller Protection:\s*([A-Z_]+)/i', $note->content, $matches)) {
+                    $seller_protection = trim($matches[1]);
+                    break;
+                }
+            }
+        }
+    }
+    
+    if (!empty($seller_protection)) {
+        $status_class = '';
+        $status_display = '';
+        
+        switch (strtoupper($seller_protection)) {
+            case 'ELIGIBLE':
+                $status_class = 'seller-protection-eligible';
+                $status_display = __('Eligible', 'woo-paypal-proxy-client');
+                break;
+            case 'PARTIALLY_ELIGIBLE':
+                $status_class = 'seller-protection-partial';
+                $status_display = __('Partially Eligible', 'woo-paypal-proxy-client');
+                break;
+            case 'NOT_ELIGIBLE':
+                $status_class = 'seller-protection-not-eligible';
+                $status_display = __('Not Eligible', 'woo-paypal-proxy-client');
+                break;
+            case 'UNKNOWN':
+                $status_class = 'seller-protection-unknown';
+                $status_display = __('Unknown', 'woo-paypal-proxy-client');
+                break;
+            default:
+                $status_class = 'seller-protection-unknown';
+                $status_display = __('Unknown', 'woo-paypal-proxy-client');
+                break;
+        }
+        
+        echo '<span class="' . esc_attr($status_class) . '">' . esc_html($status_display) . '</span>';
+    } else {
+        // Check if this order was paid with PayPal
+        $payment_method = $order->get_payment_method();
+        $paypal_order_id = $order->get_meta('_paypal_order_id', true);
+        
+        if (($payment_method === 'paypal_proxy' || $payment_method === 'paypal_direct') && !empty($paypal_order_id)) {
+            // This is a PayPal order but without seller protection data
+            echo '<span class="seller-protection-missing">' . esc_html__('Not found', 'woo-paypal-proxy-client') . '</span>';
+        } else {
+            // Not a PayPal order
+            echo '<span class="seller-protection-na">—</span>';
+        }
+    }
+}
+
+// Add CSS styles for the seller protection column
+add_action('admin_head', 'add_seller_protection_column_styles');
+function add_seller_protection_column_styles() {
+    ?>
+    <style>
+        .seller-protection-eligible {
+            color: #2e7d32;
+            font-weight: bold;
+        }
+        
+        .seller-protection-partial {
+            color: #f57c00;
+            font-weight: bold;
+        }
+        
+        .seller-protection-not-eligible {
+            color: #c62828;
+            font-weight: bold;
+        }
+        
+        .seller-protection-unknown {
+            color: #616161;
+        }
+        
+        .seller-protection-na {
+            color: #9e9e9e;
+        }
+    </style>
+    <?php
+}
+
+
+/**
  * Plugin deactivation hook
  */
 function wpppc_deactivate() {
