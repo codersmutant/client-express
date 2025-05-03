@@ -433,6 +433,10 @@ public function get_seller_protection($paypal_order_id, $server_id = 0) {
     }
     
     public function add_mobile_detection_script() {
+        
+    if ($this->get_option('mobile_only') !== 'yes') {
+        return;
+    }
     // Only add if we're on cart or checkout pages
     if (!is_cart() && !is_checkout()) {
         return;
