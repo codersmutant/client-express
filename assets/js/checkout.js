@@ -127,14 +127,19 @@
     // Clear previous errors
     clearErrors();
     
-    // Validate checkout fields first
     validateCheckoutFields().then(function(validationResult) {
-        //console.log('Checkout validation result:', validationResult);
-        if (!validationResult.valid) {
-            displayErrors(validationResult.errors);
-            creatingOrder = false;
-            return;
+     if (!validationResult.valid) {
+        displayErrors(validationResult.errors);
+        creatingOrder = false;
+        
+        // Refresh the iframe to close the popup
+        var iframe = document.getElementById('paypal-proxy-iframe');
+        if (iframe) {
+            iframe.src = iframe.src; // Refresh by resetting the src
         }
+        
+        return;
+    }
         
         // Create WooCommerce order
         //console.log('Creating WooCommerce order...');
