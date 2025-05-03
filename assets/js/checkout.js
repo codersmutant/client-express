@@ -112,46 +112,45 @@
         });
     }
     
-    /**
-     * Handle PayPal button click
-     */
-    function handlePayPalButtonClick() {
+function handlePayPalButtonClick() {
     if (creatingOrder || orderCreated) {
-        //console.log('Already processing an order, ignoring click');
         return;
     }
     
     creatingOrder = true;
-    //console.log('PayPal button clicked, starting order creation process');
     
     // Clear previous errors
     clearErrors();
     
     validateCheckoutFields().then(function(validationResult) {
-     if (!validationResult.valid) {
-        displayErrors(validationResult.errors);
-        creatingOrder = false;
-        
-        // Refresh the iframe to close the popup
-        var iframe = document.getElementById('paypal-proxy-iframe');
-        if (iframe) {
-            iframe.src = iframe.src; // Refresh by resetting the src
+        if (!validationResult.valid) {
+            displayErrors(validationResult.errors);
+            creatingOrder = false;
+            
+            $('body').trigger('update_checkout');
+            
+            // Send a special validation failed message to the iframe
+            // PayPal SDK needs to handle this properly
+            sendMessageToIframe({
+                action: 'order_creation_failed',
+                errors: validationResult.errors,
+                isValidationError: true, // Add this flag
+                message: 'Validation failed'
+            });
+            
+            
+            
+            return;
         }
         
-        return;
-    }
-        
         // Create WooCommerce order
-        //console.log('Creating WooCommerce order...');
         createOrder().then(function(orderData) {
             // Order created successfully
-            //console.log('Order created successfully:', orderData);
             orderID = orderData.order_id;
             orderCreated = true;
             creatingOrder = false;
             
             // Send message to iframe with order info
-            //console.log('Sending order data to PayPal iframe');
             sendMessageToIframe({
                 action: 'create_paypal_order',
                 order_id: orderID,
@@ -159,7 +158,6 @@
                 proxy_data: orderData.proxy_data
             });
         }).catch(function(error) {
-            //console.error('Order creation failed:', error);
             creatingOrder = false;
             
             if (error.errors) {
@@ -175,7 +173,6 @@
             });
         });
     }).catch(function(error) {
-        //console.error('Validation failed:', error);
         creatingOrder = false;
     });
 }
